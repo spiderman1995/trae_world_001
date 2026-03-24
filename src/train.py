@@ -1,4 +1,8 @@
+import sys
 import os
+# Add the project root directory to the Python path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import argparse
 import time
 import logging
@@ -13,7 +17,7 @@ from datetime import datetime
 from src.data.dataset import StockDataset
 from src.models.feature_extractor import FeatureExtractor
 from src.models.transformer import StockViT
-from src.models.loss import MultiTaskLoss, QuantileLoss, SmoothQuantileLoss, PairwiseRankingLoss, physics_constraint_loss
+from src.models.loss import MultiTaskLoss, PeakDayLoss
 
 # Setup Logging
 def setup_logging(output_dir):
@@ -52,11 +56,23 @@ def train(args):
     
     # 1. Dataset
     logger.info("Initializing dataset...")
-    train_dataset = StockDataset(args.data_dir, seq_len=args.seq_len, pred_len=args.pred_len, mode='train')
+    train_dataset = StockDataset(
+        args.data_dir,
+        seq_len=args.seq_len,
+        pred_len=args.pred_len,
+        start_date=args.start_date,
+        end_date=args.end_date
+    )
+    train_size = len(train_dataset)
+    if train_size <= 0:
+        raise ValueError(
+            f"Empty train dataset. data_dir={args.data_dir}, date_range={args.start_date}..{args.end_date}, "
+            f"seq_len={args.seq_len}, pred_len={args.pred_len}."
+        )
     # Use smaller batch size for laptop
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0, pin_memory=True)
     
-    logger.info(f"Dataset size: {len(train_dataset)} samples")
+    logger.info(f"Dataset size: {train_size} samples")
     logger.info(f"Batch size: {args.batch_size}, Batches per epoch: {len(train_loader)}")
     
     # 2. Models
@@ -66,17 +82,15 @@ def train(args):
     embed_dim = 1024 # Was 10000
     feature_extractor = FeatureExtractor(input_channels=18, output_dim=embed_dim).to(device)
     # ViT
-    vit_model = StockViT(seq_len=args.seq_len, embed_dim=embed_dim, depth=args.depth, num_heads=args.num_heads).to(device)
+    vit_model = StockViT(seq_len=args.seq_len, pred_len=args.pred_len, embed_dim=embed_dim, depth=args.depth, num_heads=args.num_heads).to(device)
     
     logger.info(f"Models moved to {device}. Embed Dim: {embed_dim}")
     
     # 3. Losses
     mtl_loss_wrapper = MultiTaskLoss(num_tasks=4).to(device)
     
-    criterion_high = SmoothQuantileLoss(quantile=0.9, delta=0.1)
-    criterion_low = QuantileLoss(quantile=0.1) # Or SmoothQuantileLoss
-    criterion_sharpe = PairwiseRankingLoss(margin=0.1)
-    criterion_dir = nn.BCEWithLogitsLoss()
+    criterion_day = PeakDayLoss(sigma=args.day_sigma)
+    criterion_value = nn.SmoothL1Loss()
     
     # 4. Optimizer
     # Optimize all parameters
@@ -111,11 +125,10 @@ def train(args):
             # Move to device
             seq_data_flat = seq_data.view(B * Seq, C, L).to(device)
             
-            target_high = targets['high'].to(device)
-            target_low = targets['low'].to(device)
-            target_sharpe = targets['sharpe'].to(device)
-            target_dir = targets['direction'].to(device)
-            current_price = targets['current_price'].to(device)
+            target_max_value = targets['max_value'].to(device)
+            target_min_value = targets['min_value'].to(device)
+            target_max_day = targets['max_day'].to(device)
+            target_min_day = targets['min_day'].to(device)
             
             optimizer.zero_grad()
             
@@ -131,47 +144,20 @@ def train(args):
                 # 2. ViT
                 outputs = vit_model(features_seq)
                 
-                pred_high = outputs['high']
-                pred_low = outputs['low']
-                pred_sharpe = outputs['sharpe']
-                pred_dir = outputs['direction']
+                pred_max_value = outputs['max_value']
+                pred_min_value = outputs['min_value']
+                pred_max_day = outputs['max_day']
+                pred_min_day = outputs['min_day']
                 
-                # 3. Calculate Losses
-                # L1: High Price
-                # Ensure squeeze() doesn't remove batch dim if B=1
-                loss_high = criterion_high(pred_high.view(-1), target_high.view(-1))
+                loss_max_value = criterion_value(pred_max_value.view(-1), target_max_value.view(-1))
+                loss_min_value = criterion_value(pred_min_value.view(-1), target_min_value.view(-1))
+                loss_max_day = criterion_day(pred_max_day, target_max_day)
+                loss_min_day = criterion_day(pred_min_day, target_min_day)
                 
-                # L2: Low Price
-                loss_low = criterion_low(pred_low.view(-1), target_low.view(-1))
-                
-                # L3: Sharpe Ranking
-                loss_sharpe = criterion_sharpe(pred_sharpe, target_sharpe)
-                
-                # L4: Direction BCE
-                # Target must be float for BCEWithLogitsLoss
-                loss_dir = criterion_dir(pred_dir.view(-1), target_dir.view(-1).float())
-                
-                # Physics Constraint
-                # Extract BigBuy feature from last time step
-                # Assume BigBuy is feature index 9
-                # seq_data_flat: [B*Seq, 18, 1442]
-                # We need the last day (index Seq-1 for each batch), last tick? or sum?
-                # User: "BigBuy > Threshold". Usually sum of BigBuy volume ratio.
-                # Feature index 9 is "buy_big_order_amt_ratio".
-                # We can take the mean or max over the day.
-                # "Big Buy" is a sparse signal, MAX or SUM is better than MEAN to capture the signal strength.
-                last_day_indices = torch.arange(Seq - 1, B * Seq, Seq, device=device)
-                last_day_data = seq_data_flat[last_day_indices] # [B, 18, 1442]
-                big_buy_feat = last_day_data[:, 9, :].max(dim=1)[0] # [B] Take Max over ticks
-                
-                loss_physics = physics_constraint_loss(pred_high, None, big_buy_feat, threshold=0.3)
-                
-                # Combine Losses
-                # Only combine 4 main losses with dynamic weights
-                losses_list = torch.stack([loss_high, loss_low, loss_sharpe, loss_dir])
+                losses_list = torch.stack([loss_max_value, loss_min_value, loss_max_day, loss_min_day])
                 loss_mtl = mtl_loss_wrapper(losses_list)
                 
-                total_loss = loss_mtl + 0.1 * loss_physics
+                total_loss = loss_mtl
             
             # Backward
             scaler.scale(total_loss).backward()
@@ -184,25 +170,23 @@ def train(args):
             # Logging
             if batch_idx % 10 == 0:
                 writer.add_scalar("Loss/Total", total_loss.item(), global_step)
-                writer.add_scalar("Loss/High", loss_high.item(), global_step)
-                writer.add_scalar("Loss/Low", loss_low.item(), global_step)
-                writer.add_scalar("Loss/Sharpe", loss_sharpe.item(), global_step)
-                writer.add_scalar("Loss/Dir", loss_dir.item(), global_step)
-                writer.add_scalar("Loss/Physics", loss_physics.item(), global_step)
+                writer.add_scalar("Loss/MaxValue", loss_max_value.item(), global_step)
+                writer.add_scalar("Loss/MinValue", loss_min_value.item(), global_step)
+                writer.add_scalar("Loss/MaxDay", loss_max_day.item(), global_step)
+                writer.add_scalar("Loss/MinDay", loss_min_day.item(), global_step)
                 
-                # Log weights
                 sigmas = torch.exp(mtl_loss_wrapper.log_vars)
-                writer.add_scalar("Weight/High", 1/(2*sigmas[0].item()**2), global_step)
-                writer.add_scalar("Weight/Low", 1/(2*sigmas[1].item()**2), global_step)
-                writer.add_scalar("Weight/Sharpe", 1/(2*sigmas[2].item()**2), global_step)
-                writer.add_scalar("Weight/Dir", 1/(2*sigmas[3].item()**2), global_step)
+                writer.add_scalar("Weight/MaxValue", 1/(2*sigmas[0].item()**2), global_step)
+                writer.add_scalar("Weight/MinValue", 1/(2*sigmas[1].item()**2), global_step)
+                writer.add_scalar("Weight/MaxDay", 1/(2*sigmas[2].item()**2), global_step)
+                writer.add_scalar("Weight/MinDay", 1/(2*sigmas[3].item()**2), global_step)
                 
             pbar.set_postfix({
                 "Loss": f"{total_loss.item():.4f}", 
-                "H": f"{loss_high.item():.2f}",
-                "L": f"{loss_low.item():.2f}",
-                "S": f"{loss_sharpe.item():.2f}",
-                "D": f"{loss_dir.item():.2f}"
+                "MaxV": f"{loss_max_value.item():.2f}",
+                "MinV": f"{loss_min_value.item():.2f}",
+                "MaxD": f"{loss_max_day.item():.2f}",
+                "MinD": f"{loss_min_day.item():.2f}"
             })
             
         epoch_duration = time.time() - epoch_start_time
@@ -216,6 +200,16 @@ def train(args):
             'feature_extractor': feature_extractor.state_dict(),
             'vit': vit_model.state_dict(),
             'optimizer': optimizer.state_dict(),
+            'mean': train_dataset.mean,
+            'std': train_dataset.std,
+            'config': {
+                'seq_len': args.seq_len,
+                'pred_len': args.pred_len,
+                'embed_dim': embed_dim,
+                'depth': args.depth,
+                'num_heads': args.num_heads,
+                'input_channels': 18,
+            },
         }, checkpoint_path)
         logger.info(f"Saved checkpoint to {checkpoint_path}")
 
@@ -225,15 +219,18 @@ def train(args):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", type=str, default=r"D:\temp\0_tempdata7")
+    parser.add_argument("--data_dir", type=str, default=r"D:\temp\0_tempdata8")
     parser.add_argument("--output_dir", type=str, default="runs")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=2) # Small batch for 4050 + Large Model
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--seq_len", type=int, default=180)
-    parser.add_argument("--pred_len", type=int, default=40)
+    parser.add_argument("--pred_len", type=int, default=60)
     parser.add_argument("--depth", type=int, default=4) # Smaller ViT for test
     parser.add_argument("--num_heads", type=int, default=4)
+    parser.add_argument("--day_sigma", type=float, default=2.0)
+    parser.add_argument("--start_date", type=str, default="2024-01-01")
+    parser.add_argument("--end_date", type=str, default="2024-12-31")
     
     args = parser.parse_args()
     

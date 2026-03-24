@@ -1,60 +1,53 @@
-import os
-import matplotlib.pyplot as plt
+
 import pandas as pd
-import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 
-def plot_prediction_analysis(df, save_path="prediction_analysis.png"):
+def plot_backtest_results(csv_path="backtest_history.csv", output_path="backtest_analysis.png"):
     """
-    Generate analysis charts for predictions.
+    读取回测历史数据并生成分析图表。
     """
-    plt.figure(figsize=(15, 10))
-    
-    # 1. High Price Prediction vs Target
-    plt.subplot(2, 2, 1)
-    plt.scatter(df['target_high'], df['pred_high'], alpha=0.5)
-    plt.plot([df['target_high'].min(), df['target_high'].max()], 
-             [df['target_high'].min(), df['target_high'].max()], 'r--')
-    plt.xlabel('Actual High Price')
-    plt.ylabel('Predicted High Price (Q90)')
-    plt.title('High Price Prediction Accuracy')
-    
-    # 2. Low Price Prediction vs Target
-    plt.subplot(2, 2, 2)
-    plt.scatter(df['target_low'], df['pred_low'], alpha=0.5, color='green')
-    plt.plot([df['target_low'].min(), df['target_low'].max()], 
-             [df['target_low'].min(), df['target_low'].max()], 'r--')
-    plt.xlabel('Actual Low Price')
-    plt.ylabel('Predicted Low Price (Q10)')
-    plt.title('Low Price Prediction Accuracy')
-    
-    # 3. Direction Confusion Matrix (Simple Bar)
-    plt.subplot(2, 2, 3)
-    df['pred_dir_class'] = (df['pred_direction_prob'] > 0.5).astype(int)
-    confusion = pd.crosstab(df['target_direction'], df['pred_dir_class'])
-    confusion.plot(kind='bar', ax=plt.gca())
-    plt.title('Direction Prediction Confusion Matrix')
-    plt.xlabel('Actual Direction (0: Down, 1: Up)')
-    plt.ylabel('Count')
-    
-    # 4. Sharpe Ratio Distribution
-    plt.subplot(2, 2, 4)
-    # Filter NaNs
-    pred_sharpe = df['pred_sharpe'].dropna()
-    target_sharpe = df['target_sharpe'].dropna()
-    
-    if len(target_sharpe) > 0:
-        plt.hist(pred_sharpe, bins=20, alpha=0.5, label='Predicted')
-        plt.hist(target_sharpe, bins=20, alpha=0.5, label='Actual')
-        plt.legend()
-        plt.title('Sharpe Ratio Distribution')
-    else:
-        plt.text(0.5, 0.5, "No valid Sharpe Ratios (NaN)", ha='center')
-    
-    plt.tight_layout()
-    plt.savefig(save_path)
-    print(f"Analysis plot saved to {save_path}")
+    try:
+        # 读取数据
+        history = pd.read_csv(csv_path, index_col='date', parse_dates=True)
+    except FileNotFoundError:
+        print(f"Error: The file {csv_path} was not found.")
+        print("Please run the backtest first to generate the history file.")
+        return
 
-if __name__ == "__main__":
-    if os.path.exists("predictions.csv"):
-        df = pd.read_csv("predictions.csv")
-        plot_prediction_analysis(df)
+    # 创建一个包含两个子图的图表
+    fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(15, 8), gridspec_kw={'height_ratios': [3, 1]})
+    fig.suptitle('Backtest Performance Analysis', fontsize=16)
+
+    # --- 子图1: 净值曲线 ---
+    ax1.plot(history.index, history['portfolio_value'], label='Portfolio Value', color='#1f77b4')
+    ax1.set_ylabel('Portfolio Value')
+    ax1.set_title('Portfolio Value Over Time')
+    ax1.grid(True, linestyle='--', alpha=0.6)
+    ax1.legend()
+    # 格式化Y轴为货币格式
+    formatter = mticker.FuncFormatter(lambda x, p: f'${x:,.0f}')
+    ax1.yaxis.set_major_formatter(formatter)
+
+    # --- 子图2: 回撤曲线 ---
+    running_max = history['portfolio_value'].cummax()
+    drawdown = (history['portfolio_value'] - running_max) / running_max
+    
+    ax2.fill_between(drawdown.index, drawdown, 0, color='#d62728', alpha=0.3)
+    ax2.plot(drawdown.index, drawdown, color='#d62728', linewidth=1)
+    ax2.set_ylabel('Drawdown')
+    ax2.set_title('Portfolio Drawdown')
+    ax2.grid(True, linestyle='--', alpha=0.6)
+    # 格式化Y轴为百分比格式
+    ax2.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0))
+
+    # 优化X轴日期显示
+    plt.xticks(rotation=45)
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+
+    # 保存图表
+    plt.savefig(output_path)
+    print(f"\nAnalysis plot saved to {output_path}")
+
+if __name__ == '__main__':
+    plot_backtest_results()

@@ -85,7 +85,7 @@ class Block(nn.Module):
         return x
 
 class StockViT(nn.Module):
-    def __init__(self, seq_len=180, embed_dim=10000, depth=12, num_heads=16, mlp_ratio=4.0, qkv_bias=True,
+    def __init__(self, seq_len=180, pred_len=60, embed_dim=10000, depth=4, num_heads=4, mlp_ratio=4.0, qkv_bias=True,
                  qk_scale=None, drop_ratio=0., attn_drop_ratio=0., drop_path_ratio=0., norm_layer=None,
                  act_layer=None):
         super(StockViT, self).__init__()
@@ -107,15 +107,10 @@ class StockViT(nn.Module):
         ])
         self.norm = norm_layer(embed_dim)
 
-        # Multi-Task Heads
-        # 1. High Price (Quantile 0.9)
-        self.head_high = nn.Linear(embed_dim, 1)
-        # 2. Low Price (Quantile 0.1)
-        self.head_low = nn.Linear(embed_dim, 1)
-        # 3. Sharpe Ratio
-        self.head_sharpe = nn.Linear(embed_dim, 1)
-        # 4. Direction (Binary)
-        self.head_direction = nn.Linear(embed_dim, 1)
+        self.head_max_value = nn.Linear(embed_dim, 1)
+        self.head_min_value = nn.Linear(embed_dim, 1)
+        self.head_max_day = nn.Linear(embed_dim, pred_len)
+        self.head_min_day = nn.Linear(embed_dim, pred_len)
 
         # Init weights
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
@@ -144,14 +139,14 @@ class StockViT(nn.Module):
     def forward(self, x):
         x = self.forward_features(x)
         
-        out_high = self.head_high(x)
-        out_low = self.head_low(x)
-        out_sharpe = self.head_sharpe(x)
-        out_direction = self.head_direction(x) # Logits
-        
+        out_max_value = self.head_max_value(x)
+        out_min_value = self.head_min_value(x)
+        out_max_day = self.head_max_day(x)
+        out_min_day = self.head_min_day(x)
+
         return {
-            'high': out_high,
-            'low': out_low,
-            'sharpe': out_sharpe,
-            'direction': out_direction
+            'max_value': out_max_value,
+            'min_value': out_min_value,
+            'max_day': out_max_day,
+            'min_day': out_min_day
         }

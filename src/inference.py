@@ -9,7 +9,7 @@ from src.data.dataset import StockDataset
 from torch.utils.data import DataLoader
 
 class Predictor:
-    def __init__(self, checkpoint_path, data_dir, device=None):
+    def __init__(self, checkpoint_path, data_dir, device=None, seq_len=None, pred_len=None, embed_dim=None, depth=None, num_heads=None, input_channels=None):
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.data_dir = data_dir
         
@@ -17,14 +17,16 @@ class Predictor:
         print(f"Loading checkpoint from {checkpoint_path}...")
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         
-        # Initialize Models (Use same args as training, or save args in checkpoint)
-        # Assuming defaults or hardcoded for now based on training script
-        self.embed_dim = 1024 # Matched with training
-        self.seq_len = 1 # Matched with test training (was 180)
-        self.pred_len = 1 # Matched with test training (was 40)
+        cfg = checkpoint.get("config") or {}
+        self.embed_dim = embed_dim or cfg.get("embed_dim") or 1024
+        self.seq_len = seq_len or cfg.get("seq_len") or 180
+        self.pred_len = pred_len or cfg.get("pred_len") or 60
+        self.depth = depth or cfg.get("depth") or 4
+        self.num_heads = num_heads or cfg.get("num_heads") or 4
+        self.input_channels = input_channels or cfg.get("input_channels") or 18
         
-        self.feature_extractor = FeatureExtractor(input_channels=18, output_dim=self.embed_dim).to(self.device)
-        self.vit_model = StockViT(seq_len=self.seq_len, embed_dim=self.embed_dim, depth=4, num_heads=4).to(self.device)
+        self.feature_extractor = FeatureExtractor(input_channels=self.input_channels, output_dim=self.embed_dim).to(self.device)
+        self.vit_model = StockViT(seq_len=self.seq_len, pred_len=self.pred_len, embed_dim=self.embed_dim, depth=self.depth, num_heads=self.num_heads).to(self.device)
         
         self.feature_extractor.load_state_dict(checkpoint['feature_extractor'])
         self.vit_model.load_state_dict(checkpoint['vit'])
@@ -40,7 +42,7 @@ class Predictor:
         # Reuse Dataset for easy data loading
         # In inference mode, we might not have targets, but the dataset class requires them currently.
         # We can use 'val' mode or ignore targets.
-        dataset = StockDataset(self.data_dir, seq_len=self.seq_len, pred_len=self.pred_len, mode='val')
+        dataset = StockDataset(self.data_dir, seq_len=self.seq_len, pred_len=self.pred_len)
         
         # Filter if stock_id is specified
         if stock_id:
@@ -62,10 +64,10 @@ class Predictor:
                 outputs = self.vit_model(features_seq)
                 
                 # Parse outputs
-                pred_high_ratio = outputs['high'].item()
-                pred_low_ratio = outputs['low'].item()
-                pred_sharpe = outputs['sharpe'].item()
-                pred_dir_prob = torch.sigmoid(outputs['direction']).item()
+                pred_max_value_ratio = outputs['max_value'].item()
+                pred_min_value_ratio = outputs['min_value'].item()
+                pred_max_day = torch.softmax(outputs['max_day'], dim=1).argmax(dim=1).item()
+                pred_min_day = torch.softmax(outputs['min_day'], dim=1).argmax(dim=1).item()
                 
                 # Get context info
                 # We need to find which stock/date this batch corresponds to
@@ -77,14 +79,18 @@ class Predictor:
                 
                 results.append({
                     'current_price': current_price,
-                    'pred_high': current_price * pred_high_ratio,
-                    'pred_low': current_price * pred_low_ratio,
-                    'pred_sharpe': pred_sharpe,
-                    'pred_direction_prob': pred_dir_prob,
-                    'target_high': targets['high'].item() * current_price,
-                    'target_low': targets['low'].item() * current_price,
-                    'target_sharpe': targets['sharpe'].item(),
-                    'target_direction': targets['direction'].item()
+                    'pred_max_value_ratio': pred_max_value_ratio,
+                    'pred_min_value_ratio': pred_min_value_ratio,
+                    'pred_max_value': current_price * pred_max_value_ratio,
+                    'pred_min_value': current_price * pred_min_value_ratio,
+                    'pred_max_day': pred_max_day,
+                    'pred_min_day': pred_min_day,
+                    'target_max_value_ratio': targets['max_value'].item(),
+                    'target_min_value_ratio': targets['min_value'].item(),
+                    'target_max_value': targets['max_value'].item() * current_price,
+                    'target_min_value': targets['min_value'].item() * current_price,
+                    'target_max_day': targets['max_day'].item(),
+                    'target_min_day': targets['min_day'].item()
                 })
                 
         return pd.DataFrame(results)

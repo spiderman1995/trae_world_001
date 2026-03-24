@@ -49,7 +49,7 @@ class MultiTaskLoss(nn.Module):
 
     def forward(self, losses):
         """
-        losses: List of [loss_high, loss_low, loss_sharpe, loss_dir]
+        losses: List of task losses
         """
         dtype = losses[0].dtype
         device = losses[0].device
@@ -60,6 +60,23 @@ class MultiTaskLoss(nn.Module):
             total_loss += precision * loss + 0.5 * self.log_vars[i]
             
         return total_loss
+
+class PeakDayLoss(nn.Module):
+    def __init__(self, sigma=2.0):
+        super(PeakDayLoss, self).__init__()
+        self.sigma = sigma
+        self.kl = nn.KLDivLoss(reduction="batchmean")
+
+    def forward(self, logits, target_idx):
+        length = logits.shape[1]
+        device = logits.device
+        idx = torch.arange(length, device=device).unsqueeze(0)
+        target_idx = target_idx.unsqueeze(1)
+        dist = (idx - target_idx).float()
+        soft = torch.exp(-0.5 * (dist / self.sigma) ** 2)
+        soft = soft / soft.sum(dim=1, keepdim=True)
+        log_probs = torch.log_softmax(logits, dim=1)
+        return self.kl(log_probs, soft)
 
 def physics_constraint_loss(pred_high, current_price_ratio, big_buy_signal, threshold=0.5):
     """
