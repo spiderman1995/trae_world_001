@@ -163,6 +163,8 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
         end_date=train_period[1]
     )
     train_size = len(train_dataset)
+    num_train_stocks = len(set(idx[0] for idx in train_dataset.indices))
+    logger.info(f"Found {num_train_stocks} unique stocks for training period.")
     logger.info(f"Train dataset size: {train_size}")
     if train_size <= 0:
         raise ValueError(
@@ -179,6 +181,8 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
     for epoch in range(args.epochs):
         pbar = tqdm(train_loader, desc=f"Fold {fold_idx} Train Epoch {epoch+1}", unit="batch", leave=True)
         for batch_idx, (seq_data, targets) in enumerate(pbar):
+            if epoch == 0 and batch_idx == 0:
+                logger.info(f"Data shape per batch: [Batch, Seq_Len, Channels, Tick_Len] = {list(seq_data.shape)}")
             B, Seq, C, L = seq_data.shape
             seq_data_flat = seq_data.view(B * Seq, C, L).to(device)
             
@@ -268,6 +272,8 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
     writer.add_scalar(f"Val/Top{args.topk}_MinDay", topk_min, global_step)
     writer.close()
 
+    return train_size, test_size
+
 def validate(feature_extractor, vit_model, loader, device, criterion_day, criterion_value, topk, fold_idx):
     feature_extractor.eval()
     vit_model.eval()
@@ -333,15 +339,27 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--drop_ratio", type=float, default=0.0)
     parser.add_argument("--attn_drop_ratio", type=float, default=0.0)
+    parser.add_argument("--start_date", type=str, default=None, help="Start date for training data (YYYY-MM-DD)")
+    parser.add_argument("--end_date", type=str, default=None, help="End date for training data (YYYY-MM-DD)")
 
     args = parser.parse_args()
     
     dates = get_sorted_dates(args.data_dir)
+    # 根据参数过滤日期
+    if args.start_date:
+        dates = [d for d in dates if d >= pd.to_datetime(args.start_date)]
+    if args.end_date:
+        dates = [d for d in dates if d <= pd.to_datetime(args.end_date)]
+
+    if not dates:
+        raise ValueError("No data available in the specified date range.")
+
     folds = build_day_range_folds(dates, args.train_days, args.test_days, args.step_days)
     
+    fold_summaries = []
     for i, fold in enumerate(folds):
         print(f"\n{'='*20} Running Fold {i+1} {'='*20}")
-        train_one_fold(
+        train_size, test_size = train_one_fold(
             args,
             i+1,
             dates,
@@ -350,6 +368,19 @@ def main():
             fold["train_range"],
             fold["test_range"]
         )
+        fold_summaries.append({
+            "Fold": i + 1,
+            "Train Period": f"{fold['train_period'][0]} to {fold['train_period'][1]}",
+            "Test Period": f"{fold['test_period'][0]} to {fold['test_period'][1]}",
+            "Num Train Samples": train_size,
+            "Num Test Samples": test_size
+        })
+
+    # 打印最终的总结报告
+    print(f"\n\n{'='*25} Training Summary Report {'='*25}")
+    summary_df = pd.DataFrame(fold_summaries)
+    print(summary_df.to_string())
+    print(f"{'='*75}")
 
 if __name__ == "__main__":
     main()
