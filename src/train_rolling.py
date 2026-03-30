@@ -193,7 +193,7 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
             
             optimizer.zero_grad()
             
-            with torch.amp.autocast('cuda'):
+            with torch.cuda.amp.autocast():
                 features_flat = feature_extractor(seq_data_flat)
                 features_seq = features_flat.view(B, Seq, -1)
                 outputs = vit_model(features_seq)
