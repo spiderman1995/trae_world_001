@@ -15,9 +15,9 @@
 │   ├── train_rolling.py      # 滚动窗口训练主脚本
 │   ├── inference.py          # 模型推理脚本
 │   ├── backtest.py           # 策略回测系统主脚本
-│   └── visualization.py      # 回测结果可视化脚本 (新增)
-├── backtest_history.csv      # 回测生成的历史净值数据 (新增)
-├── backtest_analysis.png     # 可视化脚本生成的分析图表 (新增)
+│   └── visualization.py      # 回测结果可视化脚本
+├── backtest_history.csv      # 回测生成的历史净值数据
+├── backtest_analysis.png     # 可视化脚本生成的分析图表
 ├── MODEL_README.md           # 本文档
 └── requirements.txt          # Python 依赖
 ```
@@ -26,53 +26,71 @@
 
 ## 2. 核心功能与用法
 
-### 2.1 模型训练
+### 2.1 模型训练 (命令已修正)
 
-通过运行 `train_rolling.py` 脚本，可以启动滚动窗口训练流程。
+通过运行 `train_rolling.py` 脚本，可以启动滚动窗口训练流程。该脚本接受丰富的命令行参数以控制训练过程。
 
-**运行命令:**
+**运行命令示例:**
 ```bash
-python src/train_rolling.py --data_path /path/to/your/data --save_dir ./runs_rolling/ --epochs 50
+# 这是一个更完整的示例，展示了常用参数
+python src/train_rolling.py \
+    --data_dir "/path/to/your/data" \
+    --output_dir "./runs_rolling_exp1" \
+    --epochs 10 \
+    --batch_size 8 \
+    --lr 1e-4 \
+    --seq_len 60 \
+    --pred_len 60
 ```
 
-### 2.2 模型推理
+*   `--data_dir`: **(必需)** 存放原始 `daily_summary_*.csv` 文件的目录。
+*   `--output_dir`: 训练日志和模型文件的保存目录。
+*   其他参数如 `--epochs`, `--batch_size`, `--lr` 等用于控制训练超参数。
 
-`inference.py` 脚本用于加载一个训练好的模型，并对新的数据进行预测。
+### 2.2 模型推理 (用法已修正)
 
-**运行命令:**
-```bash
-python src/inference.py --model_path ./runs_rolling/fold_1/model_final.pth --data_path /path/to/new/data
-```
+`inference.py` 脚本用于加载一个训练好的模型，并对数据进行预测。**注意：该脚本不接受命令行参数。**
 
-### 2.3 策略回测与可视化 (更新)
+**使用方法:**
 
-这是一个两步流程，用于评估模型策略并将其可视化。
+1.  **编辑 `src/inference.py` 文件**: 在文件底部的 `if __name__ == "__main__":` 部分，修改以下两个变量：
+    ```python
+    if __name__ == "__main__":
+        predictor = Predictor(
+            checkpoint_path="./runs_rolling/fold_1/model_final.pth",  # <--- 修改为您的模型路径
+            data_dir=r"/path/to/your/data"                     # <--- 修改为您的数据目录
+        )
+        df = predictor.predict()
+        df.to_csv("predictions.csv", index=False)
+    ```
+2.  **运行脚本**:
+    ```bash
+    python src/inference.py
+    ```
+*   预测结果将被保存在项目根目录的 `predictions.csv` 文件中。
+
+### 2.3 策略回测与可视化
+
+这是一个两步流程，用于评估模型策略并将其可视化。这两个脚本均**不接受命令行参数**，所有配置都在脚本内部完成。
 
 **第1步：运行回测**
 
-`backtest.py` 提供了一个完整的策略回测框架，用于评估模型在历史数据上的表现。它会输出详细的周期性日志，并在结束后生成 `backtest_history.csv` 文件。
+`backtest.py` 会执行回测计算，输出详细日志，并生成 `backtest_history.csv` 文件。
 
 **运行命令:**
 ```bash
 python src/backtest.py
 ```
-
-**如何配置:**
-
-回测的所有参数都在 `backtest.py` 文件底部的 `if __name__ == '__main__':` 代码块中进行配置，包括起止时间、初始资金、模型路径和策略参数（如`k`值）。
+*   **如何配置**: 在 `backtest.py` 文件底部的 `if __name__ == '__main__':` 代码块中修改回测参数（如起止时间、初始资金、模型路径等）。
 
 **第2步：生成可视化图表**
 
-`visualization.py` 脚本会读取上一步生成的 `backtest_history.csv` 文件，并创建一个包含净值曲线和回撤曲线的分析图表 `backtest_analysis.png`。
+`visualization.py` 会读取 `backtest_history.csv` 文件，并生成分析图表 `backtest_analysis.png`。
 
 **运行命令:**
 ```bash
 python src/visualization.py
 ```
-
-**重要提示：** 当前回测系统默认使用**模拟数据**和**模拟预测**。要获得有意义的结果，您需要：
-1.  修改 `DataLoader` 类以加载您的**真实历史数据**。
-2.  修改 `TopKStrategy` 中的 `generate_signals` 方法，接入**真实的模型推理逻辑**。
 
 ---
 
