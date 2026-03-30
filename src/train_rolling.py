@@ -151,7 +151,7 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
     
     params = list(feature_extractor.parameters()) + list(vit_model.parameters()) + list(mtl_loss_wrapper.parameters())
     optimizer = optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
-    scaler = torch.amp.GradScaler('cuda')
+    scaler = torch.cuda.amp.GradScaler()
     
     writer = SummaryWriter(log_dir=os.path.join(fold_dir, "logs"))
     
