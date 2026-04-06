@@ -1,0 +1,13 @@
+2026-03-30 17:25:23,079 - INFO - === Starting Fold 1 ===
+2026-03-30 17:25:23,079 - INFO - Train Days: 1 to 180
+2026-03-30 17:25:23,079 - INFO - Test Days: 181 to 240
+2026-03-30 17:25:23,079 - INFO - Train Period: 2020-01-02 to 2020-09-28
+2026-03-30 17:25:23,095 - INFO - Test Period: 2020-09-29 to 2020-12-29
+2026-03-30 17:25:25,210 - INFO - Using device: cuda
+2026-03-30 17:25:25,211 - INFO - Building models...
+2026-03-30 17:25:27,892 - INFO - Pre-checking files for corruption...
+2026-03-30 17:25:30,816 - INFO - Found 180 non-corrupted files out of 180.
+2026-03-30 17:25:30,816 - INFO - Computing global statistics using streaming approach...
+2026-03-30 17:37:35,488 - INFO - Stats computed over 11919528 ticks.
+2026-03-30 17:37:35,488 - INFO - Loading data from 180 files...
+2026-03-30 17:48:37,601 - ERROR - Invalid tick row count for stock/day. Expect 1442. file=daily_summary_2020-02-18.csv date=2020-02-18 stock_id=300763 rows=1419

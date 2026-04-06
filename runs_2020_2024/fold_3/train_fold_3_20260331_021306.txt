@@ -1,0 +1,25 @@
+2026-03-31 02:13:06,431 - INFO - === Starting Fold 3 ===
+2026-03-31 02:13:06,431 - INFO - Train Days: 21 to 200
+2026-03-31 02:13:06,431 - INFO - Test Days: 201 to 260
+2026-03-31 02:13:06,431 - INFO - Train Period: 2020-02-10 to 2020-11-03
+2026-03-31 02:13:06,443 - INFO - Test Period: 2020-11-04 to 2021-01-27
+2026-03-31 02:13:06,443 - INFO - Using device: cuda
+2026-03-31 02:13:06,443 - INFO - Building models...
+2026-03-31 02:13:09,228 - INFO - Pre-checking files for corruption...
+2026-03-31 02:13:12,636 - INFO - Found 180 non-corrupted files out of 180.
+2026-03-31 02:13:12,636 - INFO - Computing global statistics using streaming approach...
+2026-03-31 02:25:31,961 - INFO - Stats computed over 11965716 ticks.
+2026-03-31 02:25:31,977 - INFO - Loading data from 180 files...
+2026-03-31 02:38:56,645 - INFO - Dataset summary: days=180, zero_hit_days=0, kept_stocks=48, date_range=2020-02-10..2020-11-03
+2026-03-31 02:39:03,016 - INFO - Found 46 unique stocks for training period.
+2026-03-31 02:39:03,032 - INFO - Train dataset size: 2789
+2026-03-31 02:39:03,141 - INFO - Data shape per batch: [Batch, Seq_Len, Channels, Tick_Len] = [2, 60, 18, 1442]
+2026-03-31 03:44:59,348 - INFO - Starting Validation...
+2026-03-31 03:44:59,380 - INFO - Eval Days: 141 to 260
+2026-03-31 03:44:59,380 - INFO - Eval Period: 2020-08-04 to 2021-01-27
+2026-03-31 03:45:00,454 - INFO - Loading data from 120 files...
+2026-03-31 03:54:29,440 - INFO - Dataset summary: days=120, zero_hit_days=0, kept_stocks=49, date_range=2020-08-04..2021-01-27
+2026-03-31 03:54:34,988 - INFO - Test dataset size: 44
+2026-03-31 03:54:39,303 - INFO - Fold 3 Final Val Loss: 2.2056
+2026-03-31 03:54:39,304 - INFO - Fold 3 Top3 Max-Day Acc: 0.2727
+2026-03-31 03:54:39,305 - INFO - Fold 3 Top3 Min-Day Acc: 1.0000

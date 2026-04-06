@@ -1,0 +1,16 @@
+2026-04-02 10:30:14,800 - INFO - === Starting Fold 28 ===
+2026-04-02 10:30:14,800 - INFO - Train Days: 271 to 450
+2026-04-02 10:30:14,800 - INFO - Test Days: 451 to 510
+2026-04-02 10:30:14,800 - INFO - Train Period: 2021-02-18 to 2021-11-12
+2026-04-02 10:30:14,800 - INFO - Test Period: 2021-11-15 to 2022-02-14
+2026-04-02 10:30:14,800 - INFO - Using device: cuda
+2026-04-02 10:30:14,800 - INFO - Building models...
+2026-04-02 10:30:17,247 - INFO - Pre-checking files for corruption...
+2026-04-02 10:30:22,649 - INFO - Found 180 non-corrupted files out of 180.
+2026-04-02 10:30:22,649 - INFO - Computing global statistics using streaming approach...
+2026-04-02 10:46:04,072 - INFO - Stats computed over 12911668 ticks.
+2026-04-02 10:46:04,088 - INFO - Loading data from 180 files...
+2026-04-02 11:03:15,400 - INFO - Dataset summary: days=180, zero_hit_days=0, kept_stocks=50, date_range=2021-02-18..2021-11-12
+2026-04-02 11:03:23,960 - INFO - Found 50 unique stocks for training period.
+2026-04-02 11:03:24,038 - INFO - Train dataset size: 3004
+2026-04-02 11:03:24,251 - INFO - Data shape per batch: [Batch, Seq_Len, Channels, Tick_Len] = [2, 60, 18, 1442]
