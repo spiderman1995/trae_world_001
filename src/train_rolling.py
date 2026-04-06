@@ -117,7 +117,7 @@ def get_period_by_day_range(dates, day_range):
         dates[end_day - 1].strftime("%Y-%m-%d"),
     )
 
-def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range, test_range):
+def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range, test_range, checkpoint_path=None):
     fold_dir = os.path.join(args.output_dir, f"fold_{fold_idx}")
     os.makedirs(fold_dir, exist_ok=True)
     
@@ -143,6 +143,19 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
         drop_ratio=args.drop_ratio,
         attn_drop_ratio=args.attn_drop_ratio
     ).to(device)
+
+    # Load weights from previous fold if a checkpoint is provided
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        logger.info(f"Loading weights from checkpoint: {checkpoint_path}")
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+            feature_extractor.load_state_dict(checkpoint['feature_extractor'], strict=False)
+            vit_model.load_state_dict(checkpoint['vit'], strict=False)
+            logger.info("Weights loaded successfully.")
+        except Exception as e:
+            logger.error(f"Failed to load checkpoint: {e}. Starting with random weights.")
+    else:
+        logger.info("No checkpoint found or provided, starting with random weights.")
     
     mtl_loss_wrapper = MultiTaskLoss(num_tasks=4).to(device)
     
@@ -222,6 +235,7 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
                 writer.add_scalar("Train/Loss", total_loss.item(), global_step)
             pbar.set_postfix({"Loss": f"{total_loss.item():.4f}"})
     
+    model_save_path = os.path.join(fold_dir, f"model_final.pth")
     torch.save({
         'feature_extractor': feature_extractor.state_dict(),
         'vit': vit_model.state_dict(),
@@ -236,7 +250,7 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
             'num_heads': args.num_heads,
             'input_channels': 18,
         },
-    }, os.path.join(fold_dir, f"model_final.pth"))
+    }, model_save_path)
 
     logger.info("Starting Validation...")
     eval_range = (max(1, test_range[0] - args.seq_len), test_range[1])
@@ -272,7 +286,7 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
     writer.add_scalar(f"Val/Top{args.topk}_MinDay", topk_min, global_step)
     writer.close()
 
-    return train_size, test_size
+    return train_size, test_size, model_save_path
 
 def validate(feature_extractor, vit_model, loader, device, criterion_day, criterion_value, topk, fold_idx):
     feature_extractor.eval()
@@ -339,6 +353,7 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--drop_ratio", type=float, default=0.0)
     parser.add_argument("--attn_drop_ratio", type=float, default=0.0)
+    parser.add_argument("--resume_from", type=str, default=None, help="Path to a model checkpoint to start training from (for the first fold).")
     parser.add_argument("--start_date", type=str, default=None, help="Start date for training data (YYYY-MM-DD)")
     parser.add_argument("--end_date", type=str, default=None, help="End date for training data (YYYY-MM-DD)")
 
@@ -356,18 +371,21 @@ def main():
 
     folds = build_day_range_folds(dates, args.train_days, args.test_days, args.step_days)
     
+    previous_model_path = args.resume_from
     fold_summaries = []
     for i, fold in enumerate(folds):
         print(f"\n{'='*20} Running Fold {i+1} {'='*20}")
-        train_size, test_size = train_one_fold(
+        train_size, test_size, model_save_path = train_one_fold(
             args,
             i+1,
             dates,
             fold["train_period"],
             fold["test_period"],
             fold["train_range"],
-            fold["test_range"]
+            fold["test_range"],
+            checkpoint_path=previous_model_path
         )
+        previous_model_path = model_save_path # Update for the next fold
         fold_summaries.append({
             "Fold": i + 1,
             "Train Period": f"{fold['train_period'][0]} to {fold['train_period'][1]}",
