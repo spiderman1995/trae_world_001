@@ -5,6 +5,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import argparse
 import logging
+import random
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -13,6 +14,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from datetime import datetime
 import pandas as pd
+import numpy as np
 import glob
 
 from src.data.dataset import StockDataset
@@ -47,6 +49,14 @@ def setup_logging(output_dir, fold_idx=0):
     logger.addHandler(console_handler)
     
     return logger
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 def get_sorted_dates(data_dir):
     files = sorted(glob.glob(os.path.join(data_dir, "daily_summary_*.csv")))
@@ -186,104 +196,162 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
             f"Check logs for ChiNext50 hit and StockID normalization diagnostics."
         )
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0, pin_memory=True)
-    
+
+    logger.info("Preparing validation dataset...")
+    eval_range = (max(1, test_range[0] - args.seq_len), test_range[1])
+    eval_period = get_period_by_day_range(dates, eval_range)
+    logger.info(f"Val Days: {eval_range[0]} to {eval_range[1]}")
+    logger.info(f"Val Period: {eval_period[0]} to {eval_period[1]}")
+    val_dataset = StockDataset(
+        args.data_dir,
+        seq_len=args.seq_len,
+        pred_len=args.pred_len,
+        start_date=eval_period[0],
+        end_date=eval_period[1],
+        mean=train_dataset.mean,
+        std=train_dataset.std
+    )
+    test_size = len(val_dataset)
+    logger.info(f"Val dataset size: {test_size}")
+    if test_size <= 0:
+        raise ValueError(
+            f"Empty val dataset. data_dir={args.data_dir}, test_days={test_range}, "
+            f"test_period={test_period[0]}..{test_period[1]}, eval_days={eval_range}, eval_period={eval_period[0]}..{eval_period[1]}, "
+            f"seq_len={args.seq_len}, pred_len={args.pred_len}."
+        )
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True)
+
     global_step = 0
-    feature_extractor.train()
-    vit_model.train()
-    
+    best_val_loss = float("inf")
+    best_topk_max = 0.0
+    best_topk_min = 0.0
+    patience_counter = 0
+    best_model_path = os.path.join(fold_dir, "model_best.pth")
+
     for epoch in range(args.epochs):
+        feature_extractor.train()
+        vit_model.train()
+        epoch_train_loss = 0.0
+        epoch_train_steps = 0
+
         pbar = tqdm(train_loader, desc=f"Fold {fold_idx} Train Epoch {epoch+1}", unit="batch", leave=True)
         for batch_idx, (seq_data, targets) in enumerate(pbar):
             if epoch == 0 and batch_idx == 0:
                 logger.info(f"Data shape per batch: [Batch, Seq_Len, Channels, Tick_Len] = {list(seq_data.shape)}")
             B, Seq, C, L = seq_data.shape
             seq_data_flat = seq_data.view(B * Seq, C, L).to(device)
-            
+
             target_max_value = targets['max_value'].to(device)
             target_min_value = targets['min_value'].to(device)
             target_max_day = targets['max_day'].to(device)
             target_min_day = targets['min_day'].to(device)
-            
+
             optimizer.zero_grad()
-            
+
             with torch.cuda.amp.autocast():
                 features_flat = feature_extractor(seq_data_flat)
                 features_seq = features_flat.view(B, Seq, -1)
                 outputs = vit_model(features_seq)
-                
+
                 pred_max_value = outputs['max_value']
                 pred_min_value = outputs['min_value']
                 pred_max_day = outputs['max_day']
                 pred_min_day = outputs['min_day']
-                
+
                 loss_max_value = criterion_value(pred_max_value.view(-1), target_max_value.view(-1))
                 loss_min_value = criterion_value(pred_min_value.view(-1), target_min_value.view(-1))
                 loss_max_day = criterion_day(pred_max_day, target_max_day)
                 loss_min_day = criterion_day(pred_min_day, target_min_day)
-                
+
                 losses_list = torch.stack([loss_max_value, loss_min_value, loss_max_day, loss_min_day])
-                loss_mtl = mtl_loss_wrapper(losses_list)
-                
-                total_loss = loss_mtl
-            
+                total_loss = mtl_loss_wrapper(losses_list)
+
             scaler.scale(total_loss).backward()
             scaler.step(optimizer)
             scaler.update()
-            
-            global_step += 1
-            if batch_idx % 10 == 0:
-                writer.add_scalar("Train/Loss", total_loss.item(), global_step)
-            pbar.set_postfix({"Loss": f"{total_loss.item():.4f}"})
-    
-    model_save_path = os.path.join(fold_dir, f"model_final.pth")
-    torch.save({
-        'feature_extractor': feature_extractor.state_dict(),
-        'vit': vit_model.state_dict(),
-        'optimizer': optimizer.state_dict(),
-        'mean': train_dataset.mean,
-        'std': train_dataset.std,
-        'config': {
-            'seq_len': args.seq_len,
-            'pred_len': args.pred_len,
-            'embed_dim': embed_dim,
-            'depth': args.depth,
-            'num_heads': args.num_heads,
-            'input_channels': 18,
-        },
-    }, model_save_path)
 
-    logger.info("Starting Validation...")
-    eval_range = (max(1, test_range[0] - args.seq_len), test_range[1])
-    eval_period = get_period_by_day_range(dates, eval_range)
-    logger.info(f"Eval Days: {eval_range[0]} to {eval_range[1]}")
-    logger.info(f"Eval Period: {eval_period[0]} to {eval_period[1]}")
-    test_dataset = StockDataset(
-        args.data_dir, 
-        seq_len=args.seq_len, 
-        pred_len=args.pred_len, 
-        start_date=eval_period[0], 
-        end_date=eval_period[1],
-        mean=train_dataset.mean,
-        std=train_dataset.std
-    )
-    test_size = len(test_dataset)
-    logger.info(f"Test dataset size: {test_size}")
-    if test_size <= 0:
-        raise ValueError(
-            f"Empty test dataset. data_dir={args.data_dir}, test_days={test_range}, "
-            f"test_period={test_period[0]}..{test_period[1]}, eval_days={eval_range}, eval_period={eval_period[0]}..{eval_period[1]}, "
-            f"seq_len={args.seq_len}, pred_len={args.pred_len}. "
-            f"Check logs for ChiNext50 hit and StockID normalization diagnostics."
+            global_step += 1
+            epoch_train_loss += total_loss.item()
+            epoch_train_steps += 1
+
+            if batch_idx % 10 == 0:
+                writer.add_scalar("Train/Loss_step", total_loss.item(), global_step)
+            pbar.set_postfix({"Loss": f"{total_loss.item():.4f}"})
+
+        mean_train_loss = epoch_train_loss / max(epoch_train_steps, 1)
+        writer.add_scalar("Train/Loss_epoch", mean_train_loss, epoch + 1)
+
+        val_loss, topk_max, topk_min = validate(
+            feature_extractor, vit_model, val_loader, device, criterion_day, criterion_value, args.topk, fold_idx
         )
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True)
-    
-    val_loss, topk_max, topk_min = validate(feature_extractor, vit_model, test_loader, device, criterion_day, criterion_value, args.topk, fold_idx)
-    logger.info(f"Fold {fold_idx} Final Val Loss: {val_loss:.4f}")
-    logger.info(f"Fold {fold_idx} Top{args.topk} Max-Day Acc: {topk_max:.4f}")
-    logger.info(f"Fold {fold_idx} Top{args.topk} Min-Day Acc: {topk_min:.4f}")
-    writer.add_scalar("Val/Loss", val_loss, global_step)
-    writer.add_scalar(f"Val/Top{args.topk}_MaxDay", topk_max, global_step)
-    writer.add_scalar(f"Val/Top{args.topk}_MinDay", topk_min, global_step)
+        writer.add_scalar("Val/Loss_epoch", val_loss, epoch + 1)
+        writer.add_scalar(f"Val/Top{args.topk}_MaxDay_epoch", topk_max, epoch + 1)
+        writer.add_scalar(f"Val/Top{args.topk}_MinDay_epoch", topk_min, epoch + 1)
+
+        logger.info(
+            f"Fold {fold_idx} Epoch {epoch+1}: TrainLoss={mean_train_loss:.4f}, "
+            f"ValLoss={val_loss:.4f}, Top{args.topk}Max={topk_max:.4f}, Top{args.topk}Min={topk_min:.4f}"
+        )
+
+        if val_loss < best_val_loss - args.min_delta:
+            best_val_loss = val_loss
+            best_topk_max = topk_max
+            best_topk_min = topk_min
+            patience_counter = 0
+            torch.save({
+                'feature_extractor': feature_extractor.state_dict(),
+                'vit': vit_model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'mean': train_dataset.mean,
+                'std': train_dataset.std,
+                'config': {
+                    'seq_len': args.seq_len,
+                    'pred_len': args.pred_len,
+                    'embed_dim': embed_dim,
+                    'depth': args.depth,
+                    'num_heads': args.num_heads,
+                    'input_channels': 18,
+                },
+                'best_val_loss': best_val_loss,
+                'best_topk_max': best_topk_max,
+                'best_topk_min': best_topk_min,
+                'best_epoch': epoch + 1,
+            }, best_model_path)
+            logger.info(f"Fold {fold_idx} improved ValLoss to {best_val_loss:.4f}, saved best model.")
+        else:
+            patience_counter += 1
+            logger.info(f"Fold {fold_idx} early-stop counter: {patience_counter}/{args.patience}")
+            if patience_counter >= args.patience:
+                logger.info(f"Fold {fold_idx} early stopped at epoch {epoch+1}.")
+                break
+
+    model_save_path = os.path.join(fold_dir, "model_final.pth")
+    if os.path.exists(best_model_path):
+        best_ckpt = torch.load(best_model_path, map_location="cpu")
+        torch.save(best_ckpt, model_save_path)
+    else:
+        torch.save({
+            'feature_extractor': feature_extractor.state_dict(),
+            'vit': vit_model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'mean': train_dataset.mean,
+            'std': train_dataset.std,
+            'config': {
+                'seq_len': args.seq_len,
+                'pred_len': args.pred_len,
+                'embed_dim': embed_dim,
+                'depth': args.depth,
+                'num_heads': args.num_heads,
+                'input_channels': 18,
+            },
+            'best_val_loss': best_val_loss,
+            'best_topk_max': best_topk_max,
+            'best_topk_min': best_topk_min,
+        }, model_save_path)
+
+    logger.info(f"Fold {fold_idx} Best Val Loss: {best_val_loss:.4f}")
+    logger.info(f"Fold {fold_idx} Best Top{args.topk} Max-Day Acc: {best_topk_max:.4f}")
+    logger.info(f"Fold {fold_idx} Best Top{args.topk} Min-Day Acc: {best_topk_min:.4f}")
     writer.close()
 
     return train_size, test_size, model_save_path
@@ -336,7 +404,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default=r"D:\temp\0_tempdata8")
     parser.add_argument("--output_dir", type=str, default="runs_rolling")
-    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--seq_len", type=int, default=60) 
@@ -347,17 +415,21 @@ def main():
     parser.add_argument("--topk", type=int, default=3)
     
     # For tuning
-    parser.add_argument("--train_days", type=int, default=120)
+    parser.add_argument("--train_days", type=int, default=180)
     parser.add_argument("--test_days", type=int, default=60)
     parser.add_argument("--step_days", type=int, default=10)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--drop_ratio", type=float, default=0.0)
     parser.add_argument("--attn_drop_ratio", type=float, default=0.0)
+    parser.add_argument("--patience", type=int, default=5)
+    parser.add_argument("--min_delta", type=float, default=1e-3)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--resume_from", type=str, default=None, help="Path to a model checkpoint to start training from (for the first fold).")
     parser.add_argument("--start_date", type=str, default=None, help="Start date for training data (YYYY-MM-DD)")
     parser.add_argument("--end_date", type=str, default=None, help="End date for training data (YYYY-MM-DD)")
 
     args = parser.parse_args()
+    set_seed(args.seed)
     
     dates = get_sorted_dates(args.data_dir)
     # 根据参数过滤日期
