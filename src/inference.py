@@ -24,7 +24,9 @@ class Predictor:
         self.depth = depth or cfg.get("depth") or 4
         self.num_heads = num_heads or cfg.get("num_heads") or 4
         self.input_channels = input_channels or cfg.get("input_channels") or 18
-        
+        self.mean = checkpoint.get("mean")
+        self.std = checkpoint.get("std")
+
         self.feature_extractor = FeatureExtractor(input_channels=self.input_channels, output_dim=self.embed_dim).to(self.device)
         self.vit_model = StockViT(seq_len=self.seq_len, pred_len=self.pred_len, embed_dim=self.embed_dim, depth=self.depth, num_heads=self.num_heads).to(self.device)
         
@@ -42,7 +44,8 @@ class Predictor:
         # Reuse Dataset for easy data loading
         # In inference mode, we might not have targets, but the dataset class requires them currently.
         # We can use 'val' mode or ignore targets.
-        dataset = StockDataset(self.data_dir, seq_len=self.seq_len, pred_len=self.pred_len)
+        dataset = StockDataset(self.data_dir, seq_len=self.seq_len, pred_len=self.pred_len,
+                              mean=self.mean, std=self.std)
         
         # Filter if stock_id is specified
         if stock_id:

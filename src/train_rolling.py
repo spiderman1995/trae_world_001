@@ -175,7 +175,16 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
     params = list(feature_extractor.parameters()) + list(vit_model.parameters()) + list(mtl_loss_wrapper.parameters())
     optimizer = optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
     scaler = torch.cuda.amp.GradScaler()
-    
+
+    # Learning rate scheduler
+    if args.scheduler == "cosine":
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.lr * 0.01)
+    elif args.scheduler == "plateau":
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=2)
+    else:
+        scheduler = None
+    logger.info(f"LR Scheduler: {args.scheduler}, Grad Clip: {args.max_grad_norm}")
+
     writer = SummaryWriter(log_dir=os.path.join(fold_dir, "logs"))
     
     train_dataset = StockDataset(
@@ -267,6 +276,9 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
                 total_loss = mtl_loss_wrapper(losses_list)
 
             scaler.scale(total_loss).backward()
+            if args.max_grad_norm > 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(params, args.max_grad_norm)
             scaler.step(optimizer)
             scaler.update()
 
@@ -282,15 +294,25 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
         writer.add_scalar("Train/Loss_epoch", mean_train_loss, epoch + 1)
 
         val_loss, topk_max, topk_min = validate(
-            feature_extractor, vit_model, val_loader, device, criterion_day, criterion_value, args.topk, fold_idx
+            feature_extractor, vit_model, mtl_loss_wrapper, val_loader, device, criterion_day, criterion_value, args.topk, fold_idx
         )
         writer.add_scalar("Val/Loss_epoch", val_loss, epoch + 1)
         writer.add_scalar(f"Val/Top{args.topk}_MaxDay_epoch", topk_max, epoch + 1)
         writer.add_scalar(f"Val/Top{args.topk}_MinDay_epoch", topk_min, epoch + 1)
 
+        # Step scheduler
+        current_lr = optimizer.param_groups[0]["lr"]
+        if scheduler is not None:
+            if args.scheduler == "plateau":
+                scheduler.step(val_loss)
+            else:
+                scheduler.step()
+        writer.add_scalar("Train/LR", current_lr, epoch + 1)
+
         logger.info(
             f"Fold {fold_idx} Epoch {epoch+1}: TrainLoss={mean_train_loss:.4f}, "
-            f"ValLoss={val_loss:.4f}, Top{args.topk}Max={topk_max:.4f}, Top{args.topk}Min={topk_min:.4f}"
+            f"ValLoss={val_loss:.4f}, Top{args.topk}Max={topk_max:.4f}, Top{args.topk}Min={topk_min:.4f}, "
+            f"LR={current_lr:.2e}"
         )
 
         if val_loss < best_val_loss - args.min_delta:
@@ -356,7 +378,7 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
 
     return train_size, test_size, model_save_path
 
-def validate(feature_extractor, vit_model, loader, device, criterion_day, criterion_value, topk, fold_idx):
+def validate(feature_extractor, vit_model, mtl_loss_wrapper, loader, device, criterion_day, criterion_value, topk, fold_idx):
     feature_extractor.eval()
     vit_model.eval()
     total_loss = 0
@@ -364,36 +386,37 @@ def validate(feature_extractor, vit_model, loader, device, criterion_day, criter
     hit_max = 0
     hit_min = 0
     total_samples = 0
-    
+
     with torch.no_grad():
         pbar = tqdm(loader, desc=f"Fold {fold_idx} Val", unit="batch", leave=True)
         for seq_data, targets in pbar:
             B, Seq, C, L = seq_data.shape
             seq_data_flat = seq_data.view(B * Seq, C, L).to(device)
-            
+
             target_max_value = targets['max_value'].to(device)
             target_min_value = targets['min_value'].to(device)
             target_max_day = targets['max_day'].to(device)
             target_min_day = targets['min_day'].to(device)
-            
+
             features_flat = feature_extractor(seq_data_flat)
             features_seq = features_flat.view(B, Seq, -1)
             outputs = vit_model(features_seq)
-            
+
             loss_max_value = criterion_value(outputs['max_value'].view(-1), target_max_value.view(-1))
             loss_min_value = criterion_value(outputs['min_value'].view(-1), target_min_value.view(-1))
             loss_max_day = criterion_day(outputs['max_day'], target_max_day)
             loss_min_day = criterion_day(outputs['min_day'], target_min_day)
-            
-            total_loss += (loss_max_value + loss_min_value + loss_max_day + loss_min_day).item()
+
+            losses_list = torch.stack([loss_max_value, loss_min_value, loss_max_day, loss_min_day])
+            total_loss += mtl_loss_wrapper(losses_list).item()
             count += 1
-            
+
             pred_max_day = torch.argmax(outputs['max_day'], dim=1)
             pred_min_day = torch.argmax(outputs['min_day'], dim=1)
             hit_max += (torch.abs(pred_max_day - target_max_day) <= topk).float().sum().item()
             hit_min += (torch.abs(pred_min_day - target_min_day) <= topk).float().sum().item()
             total_samples += B
-            
+
     avg_loss = total_loss / max(count, 1)
     total_samples = max(total_samples, 1)
     topk_max = hit_max / total_samples
@@ -405,7 +428,7 @@ def main():
     parser.add_argument("--data_dir", type=str, default=r"D:\temp\0_tempdata8")
     parser.add_argument("--output_dir", type=str, default="runs_rolling")
     parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--seq_len", type=int, default=60) 
     parser.add_argument("--pred_len", type=int, default=60)
@@ -419,11 +442,14 @@ def main():
     parser.add_argument("--test_days", type=int, default=60)
     parser.add_argument("--step_days", type=int, default=10)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--drop_ratio", type=float, default=0.0)
-    parser.add_argument("--attn_drop_ratio", type=float, default=0.0)
+    parser.add_argument("--drop_ratio", type=float, default=0.1)
+    parser.add_argument("--attn_drop_ratio", type=float, default=0.1)
     parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--min_delta", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--scheduler", type=str, default="cosine", choices=["none", "cosine", "plateau"],
+                        help="LR scheduler: none, cosine (CosineAnnealingLR), plateau (ReduceLROnPlateau)")
+    parser.add_argument("--max_grad_norm", type=float, default=1.0, help="Max gradient norm for clipping (0=disabled)")
     parser.add_argument("--resume_from", type=str, default=None, help="Path to a model checkpoint to start training from (for the first fold).")
     parser.add_argument("--start_date", type=str, default=None, help="Start date for training data (YYYY-MM-DD)")
     parser.add_argument("--end_date", type=str, default=None, help="End date for training data (YYYY-MM-DD)")

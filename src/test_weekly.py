@@ -152,9 +152,6 @@ def main():
                 rebalance_date = pd.to_datetime(data_dict["dates"][rebalance_idx])
                 if rebalance_date < target_start_date or rebalance_date > target_end_date:
                     continue
-                if rebalance_idx % args.rebalance_interval != 0:
-                    continue
-
                 score = float(pred_max_value[i].item() - pred_min_value[i].item())
                 realized = float(tgt_max_value[i].item() - tgt_min_value[i].item())
                 by_week[rebalance_date].append({
@@ -165,7 +162,10 @@ def main():
                 })
             pointer += B
 
-    weekly_dates = sorted(by_week.keys())
+    # 按日历日期每 N 个交易日选一次调仓日（与 backtest.py 逻辑一致）
+    all_dates_sorted = sorted(by_week.keys())
+    weekly_dates = [d for i, d in enumerate(all_dates_sorted)
+                    if i % args.rebalance_interval == 0]
     if not weekly_dates:
         raise ValueError("No weekly rebalance samples found. Check test date range and rebalance_interval.")
 

@@ -96,7 +96,7 @@ def train(args):
     # Optimize all parameters
     params = list(feature_extractor.parameters()) + list(vit_model.parameters()) + list(mtl_loss_wrapper.parameters())
     optimizer = optim.AdamW(params, lr=args.lr, weight_decay=1e-4)
-    scaler = torch.amp.GradScaler('cuda')
+    scaler = torch.cuda.amp.GradScaler()
     
     # Logging
     writer = SummaryWriter(log_dir=os.path.join(args.output_dir, "logs"))
@@ -133,7 +133,7 @@ def train(args):
             optimizer.zero_grad()
             
             # Use torch.amp.autocast for newer PyTorch versions
-            with torch.amp.autocast('cuda'):
+            with torch.cuda.amp.autocast():
                 # 1. Feature Extraction
                 # [B*180, 10000]
                 features_flat = feature_extractor(seq_data_flat)

@@ -10,7 +10,7 @@ from tqdm import tqdm
 from .chinext50 import get_chinext50_constituents
 
 class StockDataset(Dataset):
-    def __init__(self, data_dir, seq_len=180, pred_len=40, start_date=None, end_date=None, mean=None, std=None):
+    def __init__(self, data_dir, seq_len=180, pred_len=60, start_date=None, end_date=None, mean=None, std=None):
         """
         Args:
             data_dir (str): Path to directory containing daily_summary_YYYY-MM-DD.csv files.
@@ -101,23 +101,22 @@ class StockDataset(Dataset):
                 df = df[df['StockID'].astype(str).str.strip().isin(valid_stocks)]
                 if df.empty:
                     continue
-                
+
                 feature_cols = [c for c in df.columns if c not in ("StockID", "Time")]
-                arr = df[feature_cols].to_numpy()
-                
-                # Apply log1p to first 6 columns (trade_count, total_trade_amt, etc.)
-                arr[:, :6] = np.log1p(arr[:, :6])
-                
-                # Update running statistics
-                total_sum += np.sum(arr, axis=0)
-                total_sq_sum += np.sum(arr**2, axis=0)
-                total_count += arr.shape[0]
+
+                # Per-stock validation: only include stocks with exactly 1442 finite rows
+                for _, grp in df.groupby('StockID'):
+                    if len(grp) != 1442:
+                        continue
+                    stock_arr = grp[feature_cols].to_numpy()
+                    if not np.isfinite(stock_arr).all():
+                        continue
+                    stock_arr[:, :6] = np.log1p(stock_arr[:, :6])
+                    total_sum += np.sum(stock_arr, axis=0)
+                    total_sq_sum += np.sum(stock_arr**2, axis=0)
+                    total_count += stock_arr.shape[0]
             except Exception as e:
                 logger.warning(f"Skipping corrupted file {f}: {e}")
-                continue
-                
-            except Exception as e:
-                logger.warning(f"Error processing {f} for stats: {e}")
                 continue
                 
         if total_count == 0:
@@ -423,111 +422,6 @@ class StockDataset(Dataset):
             mean = self.mean.view(1, 18, 1).numpy()
             std = self.std.view(1, 18, 1).numpy()
             input_data = (input_data - mean) / (std + 1e-6)
-        
-        return torch.FloatTensor(input_data), {
-            'max_value': torch.tensor(max_value, dtype=torch.float),
-            'min_value': torch.tensor(min_value, dtype=torch.float),
-            'max_day': torch.tensor(max_day, dtype=torch.long),
-            'min_day': torch.tensor(min_day, dtype=torch.long),
-            'current_price': torch.tensor(current_price, dtype=torch.float)
-        }
-
-class IncrementalStockDataset(Dataset):
-    """
-    Dataset that loads data incrementally.
-    It holds a buffer of currently loaded data.
-    """
-    def __init__(self, data_dir, seq_len=180, pred_len=40, mean=None, std=None):
-        self.data_dir = data_dir
-        self.seq_len = seq_len
-        self.pred_len = pred_len
-        self.stock_data = {} # StockID -> {data: [Days, C, L], dates: [Date]}
-        self.indices = [] # List of (stock_id, start_idx)
-        self.mean = mean
-        self.std = std
-        
-    def add_data(self, new_data):
-        """
-        Merge new data into existing buffer.
-        new_data: {stock_id: {data: ..., dates: ...}}
-        """
-        for stock_id, content in new_data.items():
-            if stock_id not in self.stock_data:
-                self.stock_data[stock_id] = content
-            else:
-                # Concatenate
-                self.stock_data[stock_id]['data'] = np.concatenate([self.stock_data[stock_id]['data'], content['data']], axis=0)
-                self.stock_data[stock_id]['dates'].extend(content['dates'])
-        
-        self.rebuild_indices()
-        
-    def remove_old_data(self, cutoff_date):
-        """
-        Remove data before cutoff_date to save memory.
-        cutoff_date: pd.Timestamp
-        """
-        for stock_id in list(self.stock_data.keys()):
-            dates = pd.to_datetime(self.stock_data[stock_id]['dates'])
-            mask = dates >= cutoff_date
-            
-            if not np.any(mask):
-                del self.stock_data[stock_id]
-                continue
-                
-            # Keep only valid part
-            start_idx = np.argmax(mask) # First True
-            self.stock_data[stock_id]['data'] = self.stock_data[stock_id]['data'][start_idx:]
-            self.stock_data[stock_id]['dates'] = [d for i, d in enumerate(self.stock_data[stock_id]['dates']) if mask[i]]
-            
-        self.rebuild_indices()
-
-    def rebuild_indices(self):
-        self.indices = []
-        for stock_id, data_dict in self.stock_data.items():
-            num_days = len(data_dict['dates'])
-            total_window = self.seq_len + self.pred_len
-            if num_days < total_window:
-                continue
-            for i in range(num_days - total_window + 1):
-                self.indices.append((stock_id, i))
-
-    def __len__(self):
-        return len(self.indices)
-
-    def __getitem__(self, idx):
-        # Same as StockDataset.__getitem__
-        stock_id, start_idx = self.indices[idx]
-        data_dict = self.stock_data[stock_id]
-        
-        input_seq = data_dict['data'][start_idx : start_idx + self.seq_len]
-        
-        target_start = start_idx + self.seq_len
-        target_end = target_start + self.pred_len
-        target_seq = data_dict['data'][target_start : target_end]
-        
-        current_price = input_seq[-1, 2, -1] + 1e-6
-        
-        daily_max = target_seq[:, 2, :].max(axis=1)
-        daily_min = target_seq[:, 2, :].min(axis=1)
-        
-        max_day = int(np.argmax(daily_max))
-        min_day = int(np.argmin(daily_min))
-        
-        max_value = daily_max[max_day] / current_price
-        min_value = daily_min[min_day] / current_price
-        
-        # Standardize input_seq for model input
-        input_data = input_seq.copy()
-        
-        # 1. Apply log1p to first 6 columns
-        input_data[:, :6, :] = np.log1p(input_data[:, :6, :])
-        
-        # 2. Apply Z-Score using global stats
-        if self.mean is not None and self.std is not None:
-            # Handle potential different types (Tensor vs NumPy)
-            m = self.mean.view(1, 18, 1).numpy() if hasattr(self.mean, 'view') else self.mean.reshape(1, 18, 1)
-            s = self.std.view(1, 18, 1).numpy() if hasattr(self.std, 'view') else self.std.reshape(1, 18, 1)
-            input_data = (input_data - m) / (s + 1e-6)
         
         return torch.FloatTensor(input_data), {
             'max_value': torch.tensor(max_value, dtype=torch.float),

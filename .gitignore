@@ -2,8 +2,23 @@ __pycache__/
 *.pyc
 .DS_Store
 .vscode/
-runs/
-weights/
-*.csv
+.idea/
 
+# Training outputs
+runs/
+runs_rolling*/
+weights/
+
+# Model checkpoints
 *.pth
+
+# Data files
+*.csv
+*.parquet
+
+# Visualization outputs
+*.png
+
+# Environment
+.env
+*.log
