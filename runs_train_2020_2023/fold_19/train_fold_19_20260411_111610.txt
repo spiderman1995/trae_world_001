@@ -1,0 +1,50 @@
+2026-04-11 11:16:10,284 - INFO - === Starting Fold 19 ===
+2026-04-11 11:16:10,293 - INFO - Train Days: 181 to 360
+2026-04-11 11:16:10,293 - INFO - Test Days: 361 to 420
+2026-04-11 11:16:10,294 - INFO - Train Period: 2020-09-29 to 2021-06-30
+2026-04-11 11:16:10,294 - INFO - Test Period: 2021-07-01 to 2021-09-24
+2026-04-11 11:16:10,295 - INFO - Using device: cuda
+2026-04-11 11:16:10,295 - INFO - Building models...
+2026-04-11 11:16:11,714 - INFO - Loading weights from checkpoint: runs_train_2020_2023\fold_18\model_final.pth
+2026-04-11 11:16:12,687 - INFO - Weights loaded successfully.
+2026-04-11 11:16:13,890 - INFO - Pre-checking files for corruption...
+2026-04-11 11:16:16,262 - INFO - Found 180 non-corrupted files out of 180.
+2026-04-11 11:16:16,263 - INFO - Computing global statistics using streaming approach...
+2026-04-11 11:28:44,421 - INFO - Stats computed over 12691042 ticks.
+2026-04-11 11:28:44,425 - INFO - Loading data from 180 files...
+2026-04-11 11:41:44,293 - INFO - Dataset summary: days=180, zero_hit_days=0, kept_stocks=50, date_range=2020-09-29..2021-06-30
+2026-04-11 11:41:55,466 - INFO - Found 49 unique stocks for training period.
+2026-04-11 11:41:55,475 - INFO - Train dataset size: 2926
+2026-04-11 11:41:55,476 - INFO - Preparing validation dataset...
+2026-04-11 11:41:55,476 - INFO - Val Days: 301 to 420
+2026-04-11 11:41:55,476 - INFO - Val Period: 2021-04-01 to 2021-09-24
+2026-04-11 11:41:56,363 - INFO - Loading data from 120 files...
+2026-04-11 11:51:24,521 - INFO - Dataset summary: days=120, zero_hit_days=0, kept_stocks=50, date_range=2021-04-01..2021-09-24
+2026-04-11 11:51:30,444 - INFO - Val dataset size: 49
+2026-04-11 11:51:31,729 - INFO - Data shape per batch: [Batch, Seq_Len, Channels, Tick_Len] = [8, 60, 18, 1442]
+2026-04-11 11:55:28,563 - INFO - Fold 19 Epoch 1: TrainLoss=1.3940, ValLoss=3.9183, Top3Max=0.1020, Top3Min=1.0000
+2026-04-11 11:55:30,541 - INFO - Fold 19 improved ValLoss to 3.9183, saved best model.
+2026-04-11 11:59:29,576 - INFO - Fold 19 Epoch 2: TrainLoss=1.2102, ValLoss=4.0207, Top3Max=0.0612, Top3Min=1.0000
+2026-04-11 11:59:29,577 - INFO - Fold 19 early-stop counter: 1/5
+2026-04-11 12:03:25,699 - INFO - Fold 19 Epoch 3: TrainLoss=1.2461, ValLoss=4.6643, Top3Max=0.0612, Top3Min=1.0000
+2026-04-11 12:03:25,699 - INFO - Fold 19 early-stop counter: 2/5
+2026-04-11 12:07:26,091 - INFO - Fold 19 Epoch 4: TrainLoss=1.0978, ValLoss=5.1938, Top3Max=0.0408, Top3Min=1.0000
+2026-04-11 12:07:26,092 - INFO - Fold 19 early-stop counter: 3/5
+2026-04-11 12:11:29,887 - INFO - Fold 19 Epoch 5: TrainLoss=0.9790, ValLoss=5.1719, Top3Max=0.0612, Top3Min=1.0000
+2026-04-11 12:11:29,887 - INFO - Fold 19 early-stop counter: 4/5
+2026-04-11 12:15:33,505 - INFO - Fold 19 Epoch 6: TrainLoss=0.8790, ValLoss=3.8661, Top3Max=0.0816, Top3Min=1.0000
+2026-04-11 12:15:36,694 - INFO - Fold 19 improved ValLoss to 3.8661, saved best model.
+2026-04-11 12:19:42,366 - INFO - Fold 19 Epoch 7: TrainLoss=0.7552, ValLoss=4.5677, Top3Max=0.0612, Top3Min=1.0000
+2026-04-11 12:19:42,367 - INFO - Fold 19 early-stop counter: 1/5
+2026-04-11 12:23:48,775 - INFO - Fold 19 Epoch 8: TrainLoss=0.5939, ValLoss=4.9046, Top3Max=0.0612, Top3Min=1.0000
+2026-04-11 12:23:48,776 - INFO - Fold 19 early-stop counter: 2/5
+2026-04-11 12:27:53,326 - INFO - Fold 19 Epoch 9: TrainLoss=0.5687, ValLoss=4.9567, Top3Max=0.0408, Top3Min=1.0000
+2026-04-11 12:27:53,327 - INFO - Fold 19 early-stop counter: 3/5
+2026-04-11 12:31:59,363 - INFO - Fold 19 Epoch 10: TrainLoss=0.5288, ValLoss=6.2071, Top3Max=0.0612, Top3Min=1.0000
+2026-04-11 12:31:59,364 - INFO - Fold 19 early-stop counter: 4/5
+2026-04-11 12:36:00,564 - INFO - Fold 19 Epoch 11: TrainLoss=0.7182, ValLoss=5.0718, Top3Max=0.0816, Top3Min=1.0000
+2026-04-11 12:36:00,565 - INFO - Fold 19 early-stop counter: 5/5
+2026-04-11 12:36:00,566 - INFO - Fold 19 early stopped at epoch 11.
+2026-04-11 12:36:02,552 - INFO - Fold 19 Best Val Loss: 3.8661
+2026-04-11 12:36:02,552 - INFO - Fold 19 Best Top3 Max-Day Acc: 0.0816
+2026-04-11 12:36:02,552 - INFO - Fold 19 Best Top3 Min-Day Acc: 1.0000

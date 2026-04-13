@@ -1,0 +1,52 @@
+2026-04-12 10:34:17,011 - INFO - === Starting Fold 38 ===
+2026-04-12 10:34:17,011 - INFO - Train Days: 371 to 550
+2026-04-12 10:34:17,012 - INFO - Test Days: 551 to 610
+2026-04-12 10:34:17,012 - INFO - Train Period: 2021-07-15 to 2022-04-13
+2026-04-12 10:34:17,013 - INFO - Test Period: 2022-04-14 to 2022-07-12
+2026-04-12 10:34:17,013 - INFO - Using device: cuda
+2026-04-12 10:34:17,013 - INFO - Building models...
+2026-04-12 10:34:18,329 - INFO - Loading weights from checkpoint: runs_train_2020_2023\fold_37\model_final.pth
+2026-04-12 10:34:18,994 - INFO - Weights loaded successfully.
+2026-04-12 10:34:20,046 - INFO - Pre-checking files for corruption...
+2026-04-12 10:34:22,945 - INFO - Found 180 non-corrupted files out of 180.
+2026-04-12 10:34:22,946 - INFO - Computing global statistics using streaming approach...
+2026-04-12 10:48:57,040 - INFO - Stats computed over 12978000 ticks.
+2026-04-12 10:48:57,056 - INFO - Loading data from 180 files...
+2026-04-12 11:03:09,915 - INFO - Dataset summary: days=180, zero_hit_days=0, kept_stocks=50, date_range=2021-07-15..2022-04-13
+2026-04-12 11:03:19,104 - INFO - Found 50 unique stocks for training period.
+2026-04-12 11:03:19,104 - INFO - Train dataset size: 3050
+2026-04-12 11:03:19,104 - INFO - Preparing validation dataset...
+2026-04-12 11:03:19,104 - INFO - Val Days: 491 to 610
+2026-04-12 11:03:19,104 - INFO - Val Period: 2022-01-11 to 2022-07-12
+2026-04-12 11:03:19,884 - INFO - Loading data from 120 files...
+2026-04-12 11:13:31,900 - INFO - Dataset summary: days=120, zero_hit_days=0, kept_stocks=50, date_range=2022-01-11..2022-07-12
+2026-04-12 11:13:37,853 - INFO - Val dataset size: 50
+2026-04-12 11:13:39,400 - INFO - Data shape per batch: [Batch, Seq_Len, Channels, Tick_Len] = [8, 60, 18, 1442]
+2026-04-12 11:17:49,651 - INFO - Fold 38 Epoch 1: TrainLoss=0.9883, ValLoss=4.3266, Top3Max=0.1200, Top3Min=1.0000
+2026-04-12 11:17:51,212 - INFO - Fold 38 improved ValLoss to 4.3266, saved best model.
+2026-04-12 11:21:58,959 - INFO - Fold 38 Epoch 2: TrainLoss=0.8629, ValLoss=4.1581, Top3Max=0.1600, Top3Min=1.0000
+2026-04-12 11:22:01,681 - INFO - Fold 38 improved ValLoss to 4.1581, saved best model.
+2026-04-12 11:26:10,890 - INFO - Fold 38 Epoch 3: TrainLoss=0.7608, ValLoss=4.0105, Top3Max=0.1000, Top3Min=1.0000
+2026-04-12 11:26:12,477 - INFO - Fold 38 improved ValLoss to 4.0105, saved best model.
+2026-04-12 11:30:22,212 - INFO - Fold 38 Epoch 4: TrainLoss=0.6545, ValLoss=4.5003, Top3Max=0.0800, Top3Min=1.0000
+2026-04-12 11:30:22,213 - INFO - Fold 38 early-stop counter: 1/5
+2026-04-12 11:34:30,871 - INFO - Fold 38 Epoch 5: TrainLoss=0.5765, ValLoss=3.9970, Top3Max=0.1600, Top3Min=1.0000
+2026-04-12 11:34:32,837 - INFO - Fold 38 improved ValLoss to 3.9970, saved best model.
+2026-04-12 11:38:42,542 - INFO - Fold 38 Epoch 6: TrainLoss=0.7054, ValLoss=3.7621, Top3Max=0.1200, Top3Min=1.0000
+2026-04-12 11:38:44,978 - INFO - Fold 38 improved ValLoss to 3.7621, saved best model.
+2026-04-12 11:42:53,351 - INFO - Fold 38 Epoch 7: TrainLoss=0.5866, ValLoss=3.2050, Top3Max=0.1800, Top3Min=1.0000
+2026-04-12 11:42:55,322 - INFO - Fold 38 improved ValLoss to 3.2050, saved best model.
+2026-04-12 11:47:03,090 - INFO - Fold 38 Epoch 8: TrainLoss=0.4089, ValLoss=4.2759, Top3Max=0.1600, Top3Min=1.0000
+2026-04-12 11:47:03,091 - INFO - Fold 38 early-stop counter: 1/5
+2026-04-12 11:51:10,585 - INFO - Fold 38 Epoch 9: TrainLoss=0.4208, ValLoss=3.9138, Top3Max=0.1600, Top3Min=1.0000
+2026-04-12 11:51:10,586 - INFO - Fold 38 early-stop counter: 2/5
+2026-04-12 11:55:19,431 - INFO - Fold 38 Epoch 10: TrainLoss=0.2364, ValLoss=4.0421, Top3Max=0.1800, Top3Min=1.0000
+2026-04-12 11:55:19,432 - INFO - Fold 38 early-stop counter: 3/5
+2026-04-12 11:59:28,664 - INFO - Fold 38 Epoch 11: TrainLoss=0.1405, ValLoss=5.3229, Top3Max=0.1800, Top3Min=1.0000
+2026-04-12 11:59:28,665 - INFO - Fold 38 early-stop counter: 4/5
+2026-04-12 12:03:38,110 - INFO - Fold 38 Epoch 12: TrainLoss=0.0575, ValLoss=4.1065, Top3Max=0.1400, Top3Min=1.0000
+2026-04-12 12:03:38,111 - INFO - Fold 38 early-stop counter: 5/5
+2026-04-12 12:03:38,112 - INFO - Fold 38 early stopped at epoch 12.
+2026-04-12 12:03:40,587 - INFO - Fold 38 Best Val Loss: 3.2050
+2026-04-12 12:03:40,587 - INFO - Fold 38 Best Top3 Max-Day Acc: 0.1800
+2026-04-12 12:03:40,587 - INFO - Fold 38 Best Top3 Min-Day Acc: 1.0000

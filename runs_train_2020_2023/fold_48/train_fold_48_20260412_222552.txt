@@ -1,0 +1,38 @@
+2026-04-12 22:25:52,281 - INFO - === Starting Fold 48 ===
+2026-04-12 22:25:52,281 - INFO - Train Days: 471 to 650
+2026-04-12 22:25:52,282 - INFO - Test Days: 651 to 710
+2026-04-12 22:25:52,282 - INFO - Train Period: 2021-12-13 to 2022-09-06
+2026-04-12 22:25:52,282 - INFO - Test Period: 2022-09-07 to 2022-12-07
+2026-04-12 22:25:52,283 - INFO - Using device: cuda
+2026-04-12 22:25:52,283 - INFO - Building models...
+2026-04-12 22:25:53,568 - INFO - Loading weights from checkpoint: runs_train_2020_2023\fold_47\model_final.pth
+2026-04-12 22:25:53,802 - INFO - Weights loaded successfully.
+2026-04-12 22:25:54,790 - INFO - Pre-checking files for corruption...
+2026-04-12 22:25:57,088 - INFO - Found 180 non-corrupted files out of 180.
+2026-04-12 22:25:57,089 - INFO - Computing global statistics using streaming approach...
+2026-04-12 22:40:18,072 - INFO - Stats computed over 12978000 ticks.
+2026-04-12 22:40:18,087 - INFO - Loading data from 180 files...
+2026-04-12 22:55:34,275 - INFO - Dataset summary: days=180, zero_hit_days=0, kept_stocks=50, date_range=2021-12-13..2022-09-06
+2026-04-12 22:55:42,641 - INFO - Found 50 unique stocks for training period.
+2026-04-12 22:55:42,641 - INFO - Train dataset size: 3050
+2026-04-12 22:55:42,641 - INFO - Preparing validation dataset...
+2026-04-12 22:55:42,641 - INFO - Val Days: 591 to 710
+2026-04-12 22:55:42,641 - INFO - Val Period: 2022-06-15 to 2022-12-07
+2026-04-12 22:55:43,338 - INFO - Loading data from 120 files...
+2026-04-12 23:06:21,696 - INFO - Dataset summary: days=120, zero_hit_days=0, kept_stocks=50, date_range=2022-06-15..2022-12-07
+2026-04-12 23:06:28,401 - INFO - Val dataset size: 49
+2026-04-12 23:06:30,462 - INFO - Data shape per batch: [Batch, Seq_Len, Channels, Tick_Len] = [8, 60, 18, 1442]
+2026-04-12 23:10:29,480 - INFO - Fold 48 Epoch 1: TrainLoss=nan, ValLoss=nan, Top3Max=0.3469, Top3Min=1.0000
+2026-04-12 23:10:29,480 - INFO - Fold 48 early-stop counter: 1/5
+2026-04-12 23:14:25,445 - INFO - Fold 48 Epoch 2: TrainLoss=nan, ValLoss=nan, Top3Max=0.3469, Top3Min=1.0000
+2026-04-12 23:14:25,445 - INFO - Fold 48 early-stop counter: 2/5
+2026-04-12 23:18:19,869 - INFO - Fold 48 Epoch 3: TrainLoss=nan, ValLoss=nan, Top3Max=0.3469, Top3Min=1.0000
+2026-04-12 23:18:19,870 - INFO - Fold 48 early-stop counter: 3/5
+2026-04-12 23:22:14,485 - INFO - Fold 48 Epoch 4: TrainLoss=nan, ValLoss=nan, Top3Max=0.3469, Top3Min=1.0000
+2026-04-12 23:22:14,486 - INFO - Fold 48 early-stop counter: 4/5
+2026-04-12 23:26:08,438 - INFO - Fold 48 Epoch 5: TrainLoss=nan, ValLoss=nan, Top3Max=0.3469, Top3Min=1.0000
+2026-04-12 23:26:08,439 - INFO - Fold 48 early-stop counter: 5/5
+2026-04-12 23:26:08,440 - INFO - Fold 48 early stopped at epoch 5.
+2026-04-12 23:26:09,134 - INFO - Fold 48 Best Val Loss: inf
+2026-04-12 23:26:09,135 - INFO - Fold 48 Best Top3 Max-Day Acc: 0.0000
+2026-04-12 23:26:09,135 - INFO - Fold 48 Best Top3 Min-Day Acc: 0.0000

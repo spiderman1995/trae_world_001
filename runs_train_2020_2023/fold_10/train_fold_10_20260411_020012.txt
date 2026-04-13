@@ -1,0 +1,44 @@
+2026-04-11 02:00:12,635 - INFO - === Starting Fold 10 ===
+2026-04-11 02:00:12,635 - INFO - Train Days: 91 to 270
+2026-04-11 02:00:12,636 - INFO - Test Days: 271 to 330
+2026-04-11 02:00:12,636 - INFO - Train Period: 2020-05-22 to 2021-02-10
+2026-04-11 02:00:12,636 - INFO - Test Period: 2021-02-18 to 2021-05-18
+2026-04-11 02:00:12,637 - INFO - Using device: cuda
+2026-04-11 02:00:12,637 - INFO - Building models...
+2026-04-11 02:00:14,101 - INFO - Loading weights from checkpoint: runs_train_2020_2023\fold_9\model_final.pth
+2026-04-11 02:00:15,276 - INFO - Weights loaded successfully.
+2026-04-11 02:00:16,290 - INFO - Pre-checking files for corruption...
+2026-04-11 02:00:18,636 - INFO - Found 180 non-corrupted files out of 180.
+2026-04-11 02:00:18,636 - INFO - Computing global statistics using streaming approach...
+2026-04-11 02:11:59,309 - INFO - Stats computed over 12223834 ticks.
+2026-04-11 02:11:59,314 - INFO - Loading data from 180 files...
+2026-04-11 02:24:02,131 - INFO - Dataset summary: days=180, zero_hit_days=0, kept_stocks=49, date_range=2020-05-22..2021-02-10
+2026-04-11 02:24:08,923 - INFO - Found 46 unique stocks for training period.
+2026-04-11 02:24:08,931 - INFO - Train dataset size: 2793
+2026-04-11 02:24:08,931 - INFO - Preparing validation dataset...
+2026-04-11 02:24:08,932 - INFO - Val Days: 211 to 330
+2026-04-11 02:24:08,932 - INFO - Val Period: 2020-11-18 to 2021-05-18
+2026-04-11 02:24:09,697 - INFO - Loading data from 120 files...
+2026-04-11 02:32:42,935 - INFO - Dataset summary: days=120, zero_hit_days=0, kept_stocks=50, date_range=2020-11-18..2021-05-18
+2026-04-11 02:32:48,891 - INFO - Val dataset size: 48
+2026-04-11 02:32:49,584 - INFO - Data shape per batch: [Batch, Seq_Len, Channels, Tick_Len] = [8, 60, 18, 1442]
+2026-04-11 02:36:34,931 - INFO - Fold 10 Epoch 1: TrainLoss=1.4308, ValLoss=4.9171, Top3Max=0.1875, Top3Min=1.0000
+2026-04-11 02:36:36,835 - INFO - Fold 10 improved ValLoss to 4.9171, saved best model.
+2026-04-11 02:40:20,851 - INFO - Fold 10 Epoch 2: TrainLoss=1.2465, ValLoss=4.6730, Top3Max=0.1667, Top3Min=1.0000
+2026-04-11 02:40:22,763 - INFO - Fold 10 improved ValLoss to 4.6730, saved best model.
+2026-04-11 02:44:08,529 - INFO - Fold 10 Epoch 3: TrainLoss=1.2526, ValLoss=3.7738, Top3Max=0.1458, Top3Min=1.0000
+2026-04-11 02:44:10,383 - INFO - Fold 10 improved ValLoss to 3.7738, saved best model.
+2026-04-11 02:47:54,584 - INFO - Fold 10 Epoch 4: TrainLoss=1.1376, ValLoss=4.0700, Top3Max=0.2083, Top3Min=1.0000
+2026-04-11 02:47:54,585 - INFO - Fold 10 early-stop counter: 1/5
+2026-04-11 02:51:38,602 - INFO - Fold 10 Epoch 5: TrainLoss=0.9833, ValLoss=4.5877, Top3Max=0.2083, Top3Min=1.0000
+2026-04-11 02:51:38,602 - INFO - Fold 10 early-stop counter: 2/5
+2026-04-11 02:55:22,449 - INFO - Fold 10 Epoch 6: TrainLoss=0.8627, ValLoss=5.0991, Top3Max=0.2083, Top3Min=1.0000
+2026-04-11 02:55:22,449 - INFO - Fold 10 early-stop counter: 3/5
+2026-04-11 02:59:09,304 - INFO - Fold 10 Epoch 7: TrainLoss=0.7498, ValLoss=5.4147, Top3Max=0.1875, Top3Min=1.0000
+2026-04-11 02:59:09,305 - INFO - Fold 10 early-stop counter: 4/5
+2026-04-11 03:02:54,013 - INFO - Fold 10 Epoch 8: TrainLoss=0.6946, ValLoss=5.5301, Top3Max=0.1458, Top3Min=1.0000
+2026-04-11 03:02:54,013 - INFO - Fold 10 early-stop counter: 5/5
+2026-04-11 03:02:54,014 - INFO - Fold 10 early stopped at epoch 8.
+2026-04-11 03:02:55,891 - INFO - Fold 10 Best Val Loss: 3.7738
+2026-04-11 03:02:55,891 - INFO - Fold 10 Best Top3 Max-Day Acc: 0.1458
+2026-04-11 03:02:55,892 - INFO - Fold 10 Best Top3 Min-Day Acc: 1.0000
