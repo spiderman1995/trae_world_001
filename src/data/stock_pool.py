@@ -10,6 +10,8 @@ import glob
 import logging
 import random
 import re
+import pickle
+import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
@@ -35,8 +37,37 @@ class StockPool:
         self.start_date = pd.to_datetime(start_date) if start_date else None
         self.end_date = pd.to_datetime(end_date) if end_date else None
 
-        # {stock_id: set of dates}
-        self.availability = self._scan()
+        # {stock_id: set of dates} — 优先读缓存
+        self.availability = self._load_or_scan()
+
+    def _cache_path(self):
+        """基于 data_dir + 日期范围 生成缓存文件路径。"""
+        key = f"{self.data_dir}|{self.start_date}|{self.end_date}"
+        h = hashlib.md5(key.encode()).hexdigest()[:8]
+        return os.path.join(self.data_dir, f".stock_pool_cache_{h}.pkl")
+
+    def _load_or_scan(self):
+        """有缓存则直接加载（秒级），否则扫描并保存缓存。"""
+        cache = self._cache_path()
+        if os.path.exists(cache):
+            try:
+                with open(cache, "rb") as f:
+                    data = pickle.load(f)
+                logger.info(f"StockPool: loaded cache ({len(data)} stocks) from {cache}")
+                return data
+            except Exception as e:
+                logger.warning(f"StockPool: cache corrupted, re-scanning: {e}")
+
+        availability = self._scan()
+
+        try:
+            with open(cache, "wb") as f:
+                pickle.dump(availability, f)
+            logger.info(f"StockPool: saved cache to {cache}")
+        except Exception as e:
+            logger.warning(f"StockPool: failed to save cache: {e}")
+
+        return availability
 
     def _scan(self):
         """扫描所有 CSV，只读 StockID 列，统计每只股票在哪些日期出现且 tick 数正确。"""

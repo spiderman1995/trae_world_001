@@ -57,18 +57,18 @@ class StockDataset(Dataset):
         
         # 1. Get file list
         self.filtered_files = self._get_filtered_files()
-        
-        # 2. Compute global statistics using STREAMING approach (Memory Efficient)
-        if mean is not None and std is not None:
+
+        # 2. 一次读取：加载数据 + 计算统计量（如果需要）
+        need_stats = (mean is None or std is None)
+        if not need_stats:
             self.mean = mean
             self.std = std
-        else:
-            self.mean, self.std = self._compute_streaming_stats()
-        
-        # 3. Load and organize data (Keep in RAM for speed, but could be lazy)
-        self.stock_data = self._load_data()
-        
-        # 4. Build index map (stock, start_index)
+        self.stock_data, computed_mean, computed_std = self._load_data_and_stats(compute_stats=need_stats)
+        if need_stats:
+            self.mean = computed_mean
+            self.std = computed_std
+
+        # 3. Build index map (stock, start_index)
         self.indices = self._build_indices()
 
     def _get_filtered_files(self):
@@ -90,130 +90,27 @@ class StockDataset(Dataset):
                 continue
         return filtered_files
 
-    def _compute_streaming_stats(self):
+    def _load_data_and_stats(self, compute_stats=True):
         """
-        Compute global mean and std using a streaming approach to save memory.
-        Reads file -> updates running sums -> discards data.
+        一次读取完成两件事：加载数据到内存 + 计算 mean/std（如需要）。
+        避免对同一批 CSV 文件重复读取。
+
+        Returns:
+            (stock_data_dict, mean_tensor_or_None, std_tensor_or_None)
         """
         logger = logging.getLogger(__name__)
         if not self.filtered_files:
-            return None, None
-            
-        logger.info("Pre-checking files for corruption...")
-        safe_files = []
-        for f in tqdm(self.filtered_files, desc="Pre-checking files"):
-            try:
-                pd.read_csv(f, nrows=5)  # Try reading only a few rows
-                safe_files.append(f)
-            except Exception as e:
-                logger.warning(f"Excluding corrupted file {f}: {e}")
-
-        if not safe_files:
-            logger.error("No valid files found after pre-check.")
-            return None, None
-
-        logger.info(f"Found {len(safe_files)} non-corrupted files out of {len(self.filtered_files)}.")
-
-
-        logger.info("Computing global statistics using streaming approach...")
-        total_sum = np.zeros(18)
-        total_sq_sum = np.zeros(18)
-        total_count = 0
+            return {}, None, None
 
         valid_stocks = self.stock_ids
 
-        def _stats_one_file(f):
-            """处理单个文件，返回 (file_sum, file_sq_sum, file_count)。"""
-            try:
-                df = pd.read_csv(f)
-                df = df[df['StockID'].astype(str).str.strip().isin(valid_stocks)]
-                if df.empty:
-                    return None
-                feature_cols = [c for c in df.columns if c not in ("StockID", "Time")]
-                f_sum = np.zeros(18)
-                f_sq = np.zeros(18)
-                f_cnt = 0
-                for _, grp in df.groupby('StockID'):
-                    if len(grp) != RAW_TICKS:
-                        continue
-                    stock_arr = grp[feature_cols].to_numpy().astype(np.float64)
-                    if not np.isfinite(stock_arr).all():
-                        mask = ~np.isfinite(stock_arr)
-                        for col in range(stock_arr.shape[1]):
-                            col_mask = mask[:, col]
-                            if col_mask.any():
-                                valid_m = ~col_mask
-                                if valid_m.sum() >= 2:
-                                    stock_arr[col_mask, col] = np.interp(
-                                        np.where(col_mask)[0], np.where(valid_m)[0], stock_arr[valid_m, col]
-                                    )
-                                else:
-                                    stock_arr[col_mask, col] = 0
-                    stock_arr = np.concatenate([stock_arr[:AUCTION_ZERO_START], stock_arr[AUCTION_ZERO_END:]], axis=0)
-                    stock_arr[:, :6] = np.log1p(stock_arr[:, :6])
-                    f_sum += np.sum(stock_arr, axis=0)
-                    f_sq += np.sum(stock_arr ** 2, axis=0)
-                    f_cnt += stock_arr.shape[0]
-                return (f_sum, f_sq, f_cnt)
-            except Exception as e:
-                logger.warning(f"Skipping corrupted file {f}: {e}")
-                return None
-
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = {executor.submit(_stats_one_file, f): f for f in safe_files}
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Streaming Stats"):
-                result = future.result()
-                if result is not None:
-                    total_sum += result[0]
-                    total_sq_sum += result[1]
-                    total_count += result[2]
-                
-        if total_count == 0:
-            return None, None
-            
-        mean = total_sum / total_count
-        # Variance = E[X^2] - (E[X])^2
-        var = (total_sq_sum / total_count) - (mean ** 2)
-        std = np.sqrt(np.maximum(var, 1e-10)) # Numerical stability
-        
-        logger.info(f"Stats computed over {total_count} ticks.")
-        return torch.FloatTensor(mean), torch.FloatTensor(std)
-        
-    def _load_data(self):
-        logger = logging.getLogger(__name__)
-        if not self.filtered_files:
-            return {}
-            
-        logger.info(f"Loading data from {len(self.filtered_files)} files...")
-        def is_valid_stock_id(value):
-            if value is None:
-                return False
-            if isinstance(value, (int, np.integer)):
-                return True
-            s = str(value).strip()
-            return re.fullmatch(r"\d{6}", s) is not None
-
-        def to_stock_id_str(value):
+        def _to_stock_id_str(value):
             if isinstance(value, (int, np.integer)):
                 return f"{int(value):06d}"
             return str(value).strip()
 
-        def stock_id_format_stats(raw_ids):
-            raw_ids = [x for x in raw_ids if x is not None]
-            as_str = [str(x).strip() for x in raw_ids]
-            stats = {
-                "total": len(as_str),
-                "prefix_SZ_SH": sum(1 for s in as_str if s.startswith(("SZ", "SH"))),
-                "suffix_DOT_SZ_SH": sum(1 for s in as_str if s.endswith((".SZ", ".SH"))),
-                "contains_dot": sum(1 for s in as_str if "." in s),
-                "float_like_dot0": sum(1 for s in as_str if s.endswith(".0")),
-                "not_6_digits": sum(1 for s in as_str if re.fullmatch(r"\d{6}", s) is None),
-            }
-            return stats
-
-        # Read all files (parallel)
+        # ---- 第一步：8 线程并行读 CSV + 预处理 ----
         def _read_one_csv(f):
-            """读取并预处理单个 CSV 文件。"""
             df = pd.read_csv(f)
             if "StockID" not in df.columns or "Time" not in df.columns:
                 raise ValueError(f"Invalid CSV schema (missing StockID/Time). file={f}")
@@ -232,9 +129,9 @@ class StockDataset(Dataset):
             basename = os.path.basename(f)
             date_str = basename.replace("daily_summary_", "").replace(".csv", "")
             df['date'] = pd.to_datetime(date_str)
-            df['_source_file'] = basename
             return df
 
+        logger.info(f"Loading {len(self.filtered_files)} files (8 threads, single pass)...")
         all_dfs = []
         with ThreadPoolExecutor(max_workers=8) as executor:
             futures = {executor.submit(_read_one_csv, f): f for f in self.filtered_files}
@@ -245,133 +142,69 @@ class StockDataset(Dataset):
                 except Exception as e:
                     logger.exception(f"Error reading {f}: {e}")
 
-        # 按日期排序（并行完成顺序不确定）
         all_dfs.sort(key=lambda df: df['date'].iloc[0])
 
         if not all_dfs:
-            return {}
-            
+            return {}, None, None
+
+        # ---- 第二步：单次遍历，同时存数据 + 累加统计量 ----
         stock_data = {}
+        total_sum = np.zeros(18)
+        total_sq_sum = np.zeros(18)
+        total_count = 0
 
-        valid_stocks = self.stock_ids
-
-        day_stats = []
-        
-        # Iterate over daily dataframes
-        for day_df in tqdm(all_dfs, desc="Processing Daily Data"):
-            # day_df has 'date' column added
+        for day_df in tqdm(all_dfs, desc="Processing & Stats"):
             current_date = day_df['date'].iloc[0]
-            source_file = day_df['_source_file'].iloc[0] if '_source_file' in day_df.columns else "unknown"
-            
-            raw_unique = list(pd.unique(day_df['StockID']))
-            fmt = stock_id_format_stats(raw_unique)
-            invalid_samples = [str(x).strip() for x in raw_unique if not is_valid_stock_id(x)]
-            if invalid_samples:
-                logger.error(
-                    "Invalid StockID format detected. Expect 6-digit codes only. date=%s file=%s invalid_sample=%s format_stats=%s",
-                    str(current_date)[:10],
-                    source_file,
-                    invalid_samples[:10],
-                    fmt,
-                )
-                raise ValueError(f"Invalid StockID format in file={source_file} date={str(current_date)[:10]}. Expect 6-digit codes.")
+            feature_cols = [c for c in day_df.columns if c not in ("StockID", "Time", "date")]
 
-            stock_ids = [to_stock_id_str(x) for x in raw_unique if x is not None]
-            hits = sorted(set(stock_ids) & valid_stocks)
-            day_stats.append({
-                "date": current_date,
-                "file_stocks": len(set(stock_ids)),
-                "pool_hits": len(hits),
-                "format": fmt,
-                "sample_raw": [str(x) for x in raw_unique[:10]],
-                "sample_norm": [str(x) for x in stock_ids[:10]],
-            })
-            if len(hits) == 0:
-                logger.warning(
-                    "No stocks from pool matched on date=%s file=%s. raw_sample=%s format_stats=%s",
-                    str(current_date)[:10],
-                    [str(x) for x in raw_unique[:10]],
-                    source_file,
-                    fmt,
-                )
-
-            daily_grouped = day_df.groupby('StockID')
-            
-            for stock_id, group in daily_grouped:
-                if stock_id is None or (isinstance(stock_id, float) and np.isnan(stock_id)):
-                    logger.error("Missing StockID value in file=%s date=%s", source_file, str(current_date)[:10])
-                    raise ValueError(f"Missing StockID value in file={source_file} date={str(current_date)[:10]}")
-
-                stock_id = to_stock_id_str(stock_id)
-                if re.fullmatch(r"\d{6}", stock_id) is None:
-                    logger.error(
-                        "Invalid StockID format in grouped data. Expect 6-digit. file=%s date=%s stock_id=%s",
-                        source_file,
-                        str(current_date)[:10],
-                        stock_id,
-                    )
-                    raise ValueError(f"Invalid StockID format in file={source_file} date={str(current_date)[:10]} stock_id={stock_id}")
-                
-                # Filter for ChiNext 50
+            for stock_id_raw, group in day_df.groupby('StockID'):
+                stock_id = _to_stock_id_str(stock_id_raw)
                 if stock_id not in valid_stocks:
                     continue
-                
-                # Check shape
-                feats = group.drop(['StockID', 'Time', 'date', '_source_file'], axis=1).values
+
+                feats = group[feature_cols].values
                 if feats.shape[1] != 18:
-                    logger.error(
-                        "Invalid feature column count for stock/day. Expect 18. file=%s date=%s stock_id=%s feat_cols=%d",
-                        source_file,
-                        str(current_date)[:10],
-                        stock_id,
-                        feats.shape[1],
-                    )
-                    raise ValueError(f"Invalid feature column count in file={source_file} date={str(current_date)[:10]} stock_id={stock_id}")
+                    continue
+
+                # 缺失值插值兜底
                 if not np.isfinite(feats).all():
-                    # 线性插值兜底（正常情况下前面 DataFrame 级别已处理）
                     feats = feats.astype(np.float64)
                     mask = ~np.isfinite(feats)
                     for col in range(feats.shape[1]):
                         col_mask = mask[:, col]
                         if col_mask.any():
-                            valid = ~col_mask
-                            if valid.sum() >= 2:
+                            valid_m = ~col_mask
+                            if valid_m.sum() >= 2:
                                 feats[col_mask, col] = np.interp(
-                                    np.where(col_mask)[0], np.where(valid)[0], feats[valid, col]
+                                    np.where(col_mask)[0], np.where(valid_m)[0], feats[valid_m, col]
                                 )
                             else:
                                 feats[col_mask, col] = 0
-                
-                # Ensure raw size 1442 (or already trimmed 1424)
+
+                # tick 数验证 + 裁剪
                 if feats.shape[0] == RAW_TICKS:
-                    pass  # will trim below
-                elif feats.shape[0] == CLEAN_TICKS:
-                    pass  # already clean
-                else:
-                    logger.error(
-                        "Invalid tick row count for stock/day. Expect %d or %d. file=%s date=%s stock_id=%s rows=%d",
-                        RAW_TICKS, CLEAN_TICKS,
-                        source_file,
-                        str(current_date)[:10],
-                        stock_id,
-                        feats.shape[0],
-                    )
-                    raise ValueError(f"Invalid tick row count in file={source_file} date={str(current_date)[:10]} stock_id={stock_id} rows={feats.shape[0]}")
-
-                # Transpose to [C, L]
-                feats = feats.T  # [18, 1442] or [18, 1424]
-
-                # 裁掉集合竞价零行（如果是原始1442）
-                if feats.shape[1] == RAW_TICKS:
+                    feats = feats.T  # [18, 1442]
                     feats = trim_auction_zeros(feats)  # [18, 1424]
-                
+                elif feats.shape[0] == CLEAN_TICKS:
+                    feats = feats.T  # [18, 1424]
+                else:
+                    continue  # 跳过异常行数
+
+                # 累加统计量（在 log1p 变换后的空间）
+                if compute_stats:
+                    stats_arr = feats.copy()
+                    stats_arr[:6, :] = np.log1p(stats_arr[:6, :])
+                    total_sum += np.sum(stats_arr, axis=1)   # [18]
+                    total_sq_sum += np.sum(stats_arr ** 2, axis=1)
+                    total_count += stats_arr.shape[1]  # 1424 ticks
+
+                # 存入数据字典
                 if stock_id not in stock_data:
                     stock_data[stock_id] = {'data': [], 'dates': []}
-                    
                 stock_data[stock_id]['data'].append(feats)
                 stock_data[stock_id]['dates'].append(current_date)
 
-        # Convert lists to numpy arrays
+        # ---- 第三步：整理输出 ----
         final_stock_data = {}
         for stock_id, content in stock_data.items():
             if len(content['data']) > 0:
@@ -380,20 +213,19 @@ class StockDataset(Dataset):
                     'dates': content['dates']
                 }
 
-        if day_stats:
-            zero_days = [str(d["date"])[:10] for d in day_stats if d["pool_hits"] == 0]
-            logger.info(
-                "Dataset summary: days=%d, zero_hit_days=%d, kept_stocks=%d, date_range=%s..%s",
-                len(day_stats),
-                len(zero_days),
-                len(final_stock_data),
-                str(day_stats[0]["date"])[:10],
-                str(day_stats[-1]["date"])[:10],
-            )
-            if zero_days:
-                logger.warning("Zero pool-hit dates (first 20): %s", zero_days[:20])
+        logger.info(f"Loaded {len(final_stock_data)} stocks, {sum(len(v['dates']) for v in final_stock_data.values())} stock-days.")
 
-        return final_stock_data
+        # 计算 mean/std
+        computed_mean, computed_std = None, None
+        if compute_stats and total_count > 0:
+            mean = total_sum / total_count
+            var = (total_sq_sum / total_count) - (mean ** 2)
+            std = np.sqrt(np.maximum(var, 1e-10))
+            computed_mean = torch.FloatTensor(mean)
+            computed_std = torch.FloatTensor(std)
+            logger.info(f"Stats computed over {total_count} ticks.")
+
+        return final_stock_data, computed_mean, computed_std
         
     def _build_indices(self):
         indices = []

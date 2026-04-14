@@ -53,8 +53,9 @@ max_value = daily_max[max_day] / current_price - 1.0
 
 1. First 6 features: `log1p(x)` first
 2. Then Z-score: `(x - mean) / (std + 1e-6)`
-3. `mean/std` computed per-fold from the sampled stocks' training data
+3. `mean/std` computed per-fold from the sampled stocks' training data (single-pass with data loading)
 4. `mean/std` are saved in checkpoint and must be reused at inference/test/backtest
+5. Missing values (NaN/Inf): linear interpolation along tick axis, fallback to 0
 
 ## Loss Functions (`loss.py`)
 
