@@ -29,7 +29,7 @@ def trim_auction_zeros(arr):
 
 class StockDataset(Dataset):
     def __init__(self, data_dir, seq_len=180, pred_len=60, start_date=None, end_date=None,
-                 mean=None, std=None, stock_ids=None):
+                 mean=None, std=None, stock_ids=None, sample_stride=10):
         """
         Args:
             data_dir (str): Path to directory containing daily_summary_YYYY-MM-DD.csv files.
@@ -40,10 +40,12 @@ class StockDataset(Dataset):
             mean (Tensor): Pre-computed mean for normalization.
             std (Tensor): Pre-computed std for normalization.
             stock_ids (list): Stock IDs to include. None = fallback to ChiNext50.
+            sample_stride (int): Sliding window stride for sample generation. Default 10.
         """
         self.data_dir = data_dir
         self.seq_len = seq_len
         self.pred_len = pred_len
+        self.sample_stride = sample_stride
         self.start_date = pd.to_datetime(start_date) if start_date else None
         self.end_date = pd.to_datetime(end_date) if end_date else None
         # 股票池：外部传入或回退到 ChiNext50
@@ -381,18 +383,11 @@ class StockDataset(Dataset):
         indices = []
         for stock_id, data_dict in self.stock_data.items():
             num_days = len(data_dict['dates'])
-            # We need seq_len + pred_len days for one sample
-            # seq_len for input, pred_len for target
-            
-            # Example: Day 0 to 179 (Input), Day 180 to 219 (Target)
-            # Total days needed: 180 + 40 = 220
-            
-            # Stride = 1 (Moving window)
             total_window = self.seq_len + self.pred_len
             if num_days < total_window:
                 continue
-                
-            for i in range(num_days - total_window + 1):
+
+            for i in range(0, num_days - total_window + 1, self.sample_stride):
                 indices.append((stock_id, i))
                 
         return indices

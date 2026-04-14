@@ -213,6 +213,7 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
         start_date=train_period[0],
         end_date=train_period[1],
         stock_ids=sampled_stocks,
+        sample_stride=args.sample_stride,
     )
     train_size = len(train_dataset)
     num_train_stocks = len(set(idx[0] for idx in train_dataset.indices))
@@ -244,6 +245,7 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
         mean=train_dataset.mean,
         std=train_dataset.std,
         stock_ids=sampled_stocks,
+        sample_stride=args.sample_stride,
     )
     test_size = len(val_dataset)
     logger.info(f"Val dataset size: {test_size}")
@@ -492,6 +494,7 @@ def main():
     parser.add_argument("--stock_pool", type=str, default="random", choices=["random", "chinext50"],
                         help="Stock sampling strategy: random (sample from all), chinext50 (fixed 50)")
     parser.add_argument("--num_stocks", type=int, default=50, help="Number of stocks to sample per fold (when stock_pool=random)")
+    parser.add_argument("--sample_stride", type=int, default=10, help="Sample-level sliding window stride (days). Larger = less overlap, fewer samples")
     # 数据加载
     parser.add_argument("--num_workers", type=int, default=4, help="DataLoader num_workers (0=main thread)")
     # Loss
