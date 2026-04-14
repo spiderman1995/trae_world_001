@@ -1,0 +1,24 @@
+2026-04-14 07:39:40,622 - INFO - === Starting Fold 19 ===
+2026-04-14 07:39:40,622 - INFO - Train Days: 181 to 360
+2026-04-14 07:39:40,622 - INFO - Test Days: 361 to 420
+2026-04-14 07:39:40,622 - INFO - Train Period: 2020-09-29 to 2021-06-30
+2026-04-14 07:39:40,622 - INFO - Test Period: 2021-07-01 to 2021-09-24
+2026-04-14 07:39:40,622 - INFO - Using device: cuda
+2026-04-14 07:39:40,622 - INFO - Building models...
+2026-04-14 07:39:42,325 - INFO - Loading weights from checkpoint: runs_rolling_2020_2021\fold_18\model_final.pth
+2026-04-14 07:39:42,888 - INFO - Weights loaded successfully.
+2026-04-14 07:39:42,888 - INFO - LR Scheduler: cosine, Grad Clip: 1.0
+2026-04-14 07:39:43,544 - INFO - Pre-checking files for corruption...
+2026-04-14 07:39:45,107 - INFO - Found 180 non-corrupted files out of 180.
+2026-04-14 07:39:45,107 - INFO - Computing global statistics using streaming approach...
+2026-04-14 07:51:15,405 - INFO - Stats computed over 12691042 ticks.
+2026-04-14 07:51:15,405 - INFO - Loading data from 180 files...
+2026-04-14 08:02:31,280 - INFO - Dataset summary: days=180, zero_hit_days=0, kept_stocks=50, date_range=2020-09-29..2021-06-30
+2026-04-14 08:02:37,906 - INFO - Found 49 unique stocks for training period.
+2026-04-14 08:02:37,906 - INFO - Train dataset size: 2926
+2026-04-14 08:02:37,906 - INFO - Preparing validation dataset...
+2026-04-14 08:02:37,906 - INFO - Val Days: 301 to 420
+2026-04-14 08:02:37,906 - INFO - Val Period: 2021-04-01 to 2021-09-24
+2026-04-14 08:02:38,703 - INFO - Loading data from 120 files...
+2026-04-14 08:11:02,011 - INFO - Dataset summary: days=120, zero_hit_days=0, kept_stocks=50, date_range=2021-04-01..2021-09-24
+2026-04-14 08:11:07,054 - INFO - Val dataset size: 49

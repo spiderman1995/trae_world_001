@@ -6,7 +6,7 @@ __pycache__/
 
 # Training outputs
 runs/
-runs_rolling*/
+# runs_rolling*/
 weights/
 
 # Model checkpoints

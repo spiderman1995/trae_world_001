@@ -1,0 +1,49 @@
+2026-04-14 01:37:08,549 - INFO - === Starting Fold 13 ===
+2026-04-14 01:37:08,549 - INFO - Train Days: 121 to 300
+2026-04-14 01:37:08,549 - INFO - Test Days: 301 to 360
+2026-04-14 01:37:08,549 - INFO - Train Period: 2020-07-07 to 2021-03-31
+2026-04-14 01:37:08,549 - INFO - Test Period: 2021-04-01 to 2021-06-30
+2026-04-14 01:37:08,549 - INFO - Using device: cuda
+2026-04-14 01:37:08,549 - INFO - Building models...
+2026-04-14 01:37:10,049 - INFO - Loading weights from checkpoint: runs_rolling_2020_2021\fold_12\model_final.pth
+2026-04-14 01:37:10,596 - INFO - Weights loaded successfully.
+2026-04-14 01:37:10,596 - INFO - LR Scheduler: cosine, Grad Clip: 1.0
+2026-04-14 01:37:11,643 - INFO - Pre-checking files for corruption...
+2026-04-14 01:37:13,830 - INFO - Found 180 non-corrupted files out of 180.
+2026-04-14 01:37:13,830 - INFO - Computing global statistics using streaming approach...
+2026-04-14 01:48:04,033 - INFO - Stats computed over 12353614 ticks.
+2026-04-14 01:48:04,049 - INFO - Loading data from 180 files...
+2026-04-14 01:58:40,788 - INFO - Dataset summary: days=180, zero_hit_days=0, kept_stocks=49, date_range=2020-07-07..2021-03-31
+2026-04-14 01:58:47,773 - INFO - Found 47 unique stocks for training period.
+2026-04-14 01:58:47,773 - INFO - Train dataset size: 2795
+2026-04-14 01:58:47,773 - INFO - Preparing validation dataset...
+2026-04-14 01:58:47,773 - INFO - Val Days: 241 to 360
+2026-04-14 01:58:47,773 - INFO - Val Period: 2020-12-30 to 2021-06-30
+2026-04-14 01:58:48,461 - INFO - Loading data from 120 files...
+2026-04-14 02:06:26,354 - INFO - Dataset summary: days=120, zero_hit_days=0, kept_stocks=50, date_range=2020-12-30..2021-06-30
+2026-04-14 02:06:32,261 - INFO - Val dataset size: 49
+2026-04-14 02:06:37,355 - INFO - Data shape per batch: [Batch, Seq_Len, Channels, Tick_Len] = [16, 60, 18, 1442]
+2026-04-14 02:10:10,341 - INFO - Fold 13 Epoch 1: TrainLoss=1.3546, ValLoss=3.1077, Top3Max=0.1020, Top3Min=1.0000, LR=1.00e-04
+2026-04-14 02:10:12,404 - INFO - Fold 13 improved ValLoss to 3.1077, saved best model.
+2026-04-14 02:13:44,843 - INFO - Fold 13 Epoch 2: TrainLoss=1.1806, ValLoss=3.2303, Top3Max=0.1633, Top3Min=1.0000, LR=9.94e-05
+2026-04-14 02:13:44,843 - INFO - Fold 13 early-stop counter: 1/5
+2026-04-14 02:17:15,327 - INFO - Fold 13 Epoch 3: TrainLoss=1.1146, ValLoss=3.5517, Top3Max=0.0816, Top3Min=1.0000, LR=9.76e-05
+2026-04-14 02:17:15,327 - INFO - Fold 13 early-stop counter: 2/5
+2026-04-14 02:20:46,735 - INFO - Fold 13 Epoch 4: TrainLoss=1.0324, ValLoss=2.9913, Top3Max=0.1837, Top3Min=1.0000, LR=9.46e-05
+2026-04-14 02:20:48,751 - INFO - Fold 13 improved ValLoss to 2.9913, saved best model.
+2026-04-14 02:24:20,815 - INFO - Fold 13 Epoch 5: TrainLoss=0.9785, ValLoss=2.7898, Top3Max=0.1837, Top3Min=1.0000, LR=9.05e-05
+2026-04-14 02:24:22,643 - INFO - Fold 13 improved ValLoss to 2.7898, saved best model.
+2026-04-14 02:27:53,589 - INFO - Fold 13 Epoch 6: TrainLoss=0.9208, ValLoss=3.4653, Top3Max=0.1224, Top3Min=1.0000, LR=8.55e-05
+2026-04-14 02:27:53,589 - INFO - Fold 13 early-stop counter: 1/5
+2026-04-14 02:31:24,606 - INFO - Fold 13 Epoch 7: TrainLoss=0.8530, ValLoss=4.3643, Top3Max=0.2041, Top3Min=1.0000, LR=7.96e-05
+2026-04-14 02:31:24,622 - INFO - Fold 13 early-stop counter: 2/5
+2026-04-14 02:34:56,998 - INFO - Fold 13 Epoch 8: TrainLoss=0.7709, ValLoss=4.0126, Top3Max=0.1633, Top3Min=1.0000, LR=7.30e-05
+2026-04-14 02:34:57,014 - INFO - Fold 13 early-stop counter: 3/5
+2026-04-14 02:38:30,302 - INFO - Fold 13 Epoch 9: TrainLoss=0.7395, ValLoss=4.0699, Top3Max=0.1020, Top3Min=1.0000, LR=6.58e-05
+2026-04-14 02:38:30,302 - INFO - Fold 13 early-stop counter: 4/5
+2026-04-14 02:42:01,433 - INFO - Fold 13 Epoch 10: TrainLoss=0.6480, ValLoss=3.4598, Top3Max=0.1633, Top3Min=1.0000, LR=5.82e-05
+2026-04-14 02:42:01,433 - INFO - Fold 13 early-stop counter: 5/5
+2026-04-14 02:42:01,433 - INFO - Fold 13 early stopped at epoch 10.
+2026-04-14 02:42:03,480 - INFO - Fold 13 Best Val Loss: 2.7898
+2026-04-14 02:42:03,480 - INFO - Fold 13 Best Top3 Max-Day Acc: 0.1837
+2026-04-14 02:42:03,480 - INFO - Fold 13 Best Top3 Min-Day Acc: 1.0000
