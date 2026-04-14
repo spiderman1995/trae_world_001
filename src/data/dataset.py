@@ -2,6 +2,7 @@ import os
 import glob
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 import numpy as np
 import torch
@@ -121,32 +122,51 @@ class StockDataset(Dataset):
 
         valid_stocks = self.stock_ids
 
-        for f in tqdm(safe_files, desc="Streaming Stats"):
+        def _stats_one_file(f):
+            """处理单个文件，返回 (file_sum, file_sq_sum, file_count)。"""
             try:
                 df = pd.read_csv(f)
-                # Filter for valid stocks first to save computation
                 df = df[df['StockID'].astype(str).str.strip().isin(valid_stocks)]
                 if df.empty:
-                    continue
-
+                    return None
                 feature_cols = [c for c in df.columns if c not in ("StockID", "Time")]
-
-                # Per-stock validation: accept 1442 raw ticks, trim auction zeros to 1424
+                f_sum = np.zeros(18)
+                f_sq = np.zeros(18)
+                f_cnt = 0
                 for _, grp in df.groupby('StockID'):
                     if len(grp) != RAW_TICKS:
                         continue
-                    stock_arr = grp[feature_cols].to_numpy()  # [1442, 18]
+                    stock_arr = grp[feature_cols].to_numpy().astype(np.float64)
                     if not np.isfinite(stock_arr).all():
-                        continue
-                    # 裁掉集合竞价零行: [1442, 18] → [1424, 18]
+                        mask = ~np.isfinite(stock_arr)
+                        for col in range(stock_arr.shape[1]):
+                            col_mask = mask[:, col]
+                            if col_mask.any():
+                                valid_m = ~col_mask
+                                if valid_m.sum() >= 2:
+                                    stock_arr[col_mask, col] = np.interp(
+                                        np.where(col_mask)[0], np.where(valid_m)[0], stock_arr[valid_m, col]
+                                    )
+                                else:
+                                    stock_arr[col_mask, col] = 0
                     stock_arr = np.concatenate([stock_arr[:AUCTION_ZERO_START], stock_arr[AUCTION_ZERO_END:]], axis=0)
                     stock_arr[:, :6] = np.log1p(stock_arr[:, :6])
-                    total_sum += np.sum(stock_arr, axis=0)
-                    total_sq_sum += np.sum(stock_arr**2, axis=0)
-                    total_count += stock_arr.shape[0]
+                    f_sum += np.sum(stock_arr, axis=0)
+                    f_sq += np.sum(stock_arr ** 2, axis=0)
+                    f_cnt += stock_arr.shape[0]
+                return (f_sum, f_sq, f_cnt)
             except Exception as e:
                 logger.warning(f"Skipping corrupted file {f}: {e}")
-                continue
+                return None
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {executor.submit(_stats_one_file, f): f for f in safe_files}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Streaming Stats"):
+                result = future.result()
+                if result is not None:
+                    total_sum += result[0]
+                    total_sq_sum += result[1]
+                    total_count += result[2]
                 
         if total_count == 0:
             return None, None
@@ -191,53 +211,43 @@ class StockDataset(Dataset):
             }
             return stats
 
-        # Read all files
+        # Read all files (parallel)
+        def _read_one_csv(f):
+            """读取并预处理单个 CSV 文件。"""
+            df = pd.read_csv(f)
+            if "StockID" not in df.columns or "Time" not in df.columns:
+                raise ValueError(f"Invalid CSV schema (missing StockID/Time). file={f}")
+            feature_cols = [c for c in df.columns if c not in ("StockID", "Time")]
+            if len(feature_cols) != 18:
+                raise ValueError(f"Invalid CSV schema (expected 18 feature cols). file={f}")
+            df[feature_cols] = df[feature_cols].apply(pd.to_numeric, errors="coerce")
+            df[feature_cols] = df[feature_cols].replace([np.inf, -np.inf], np.nan)
+            if df[feature_cols].isna().any().any():
+                nan_count = df[feature_cols].isna().sum().sum()
+                df[feature_cols] = df.groupby('StockID')[feature_cols].apply(
+                    lambda g: g.interpolate(method='linear', limit_direction='both')
+                )
+                df[feature_cols] = df[feature_cols].fillna(0)
+                logger.warning("Interpolated %d NaN/Inf values in file=%s", nan_count, f)
+            basename = os.path.basename(f)
+            date_str = basename.replace("daily_summary_", "").replace(".csv", "")
+            df['date'] = pd.to_datetime(date_str)
+            df['_source_file'] = basename
+            return df
+
         all_dfs = []
-        for f in tqdm(self.filtered_files, desc="Reading CSVs"):
-            try:
-                # Read only necessary columns if possible to save memory
-                # But here we read all and filter
-                df = pd.read_csv(f)
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {executor.submit(_read_one_csv, f): f for f in self.filtered_files}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Reading CSVs"):
+                f = futures[future]
+                try:
+                    all_dfs.append(future.result())
+                except Exception as e:
+                    logger.exception(f"Error reading {f}: {e}")
 
-                if "StockID" not in df.columns or "Time" not in df.columns:
-                    logger.error("Invalid CSV schema: missing StockID/Time. file=%s cols=%s", f, list(df.columns))
-                    raise ValueError(f"Invalid CSV schema (missing StockID/Time). file={f}")
+        # 按日期排序（并行完成顺序不确定）
+        all_dfs.sort(key=lambda df: df['date'].iloc[0])
 
-                feature_cols = [c for c in df.columns if c not in ("StockID", "Time")]
-                if len(feature_cols) != 18:
-                    logger.error(
-                        "Invalid CSV schema: expected 18 feature cols (20 total including StockID/Time). file=%s col_count=%d feature_col_count=%d",
-                        f,
-                        len(df.columns),
-                        len(feature_cols),
-                    )
-                    logger.error("Feature cols in file=%s: %s", f, feature_cols)
-                    raise ValueError(f"Invalid CSV schema (expected 18 feature cols). file={f}")
-
-                df[feature_cols] = df[feature_cols].apply(pd.to_numeric, errors="coerce")
-                if df[feature_cols].isna().any().any():
-                    nan_cols = [c for c in feature_cols if df[c].isna().any()]
-                    logger.error(
-                        "NaN detected in feature columns. file=%s nan_cols=%s",
-                        f,
-                        nan_cols,
-                    )
-                    raise ValueError(f"NaN detected in feature columns. file={f} nan_cols={nan_cols}")
-                arr = df[feature_cols].to_numpy()
-                if not np.isfinite(arr).all():
-                    logger.error("Inf detected in feature values. file=%s", f)
-                    raise ValueError(f"Inf detected in feature values. file={f}")
-                
-                # Extract date from filename: daily_summary_2024-01-02.csv
-                basename = os.path.basename(f)
-                date_str = basename.replace("daily_summary_", "").replace(".csv", "")
-                df['date'] = pd.to_datetime(date_str)
-                df['_source_file'] = basename
-                
-                all_dfs.append(df)
-            except Exception as e:
-                logger.exception(f"Error reading {f}: {e}")
-                
         if not all_dfs:
             return {}
             
@@ -318,13 +328,19 @@ class StockDataset(Dataset):
                     )
                     raise ValueError(f"Invalid feature column count in file={source_file} date={str(current_date)[:10]} stock_id={stock_id}")
                 if not np.isfinite(feats).all():
-                    logger.error(
-                        "Non-finite feature values for stock/day. file=%s date=%s stock_id=%s",
-                        source_file,
-                        str(current_date)[:10],
-                        stock_id,
-                    )
-                    raise ValueError(f"Non-finite feature values in file={source_file} date={str(current_date)[:10]} stock_id={stock_id}")
+                    # 线性插值兜底（正常情况下前面 DataFrame 级别已处理）
+                    feats = feats.astype(np.float64)
+                    mask = ~np.isfinite(feats)
+                    for col in range(feats.shape[1]):
+                        col_mask = mask[:, col]
+                        if col_mask.any():
+                            valid = ~col_mask
+                            if valid.sum() >= 2:
+                                feats[col_mask, col] = np.interp(
+                                    np.where(col_mask)[0], np.where(valid)[0], feats[valid, col]
+                                )
+                            else:
+                                feats[col_mask, col] = 0
                 
                 # Ensure raw size 1442 (or already trimmed 1424)
                 if feats.shape[0] == RAW_TICKS:
