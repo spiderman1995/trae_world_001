@@ -1,7 +1,0 @@
-2026-03-30 15:48:54,223 - INFO - === Starting Fold 1 ===
-2026-03-30 15:48:54,223 - INFO - Train Days: 1 to 180
-2026-03-30 15:48:54,223 - INFO - Test Days: 181 to 240
-2026-03-30 15:48:54,223 - INFO - Train Period: 2020-01-02 to 2020-09-28
-2026-03-30 15:48:54,223 - INFO - Test Period: 2020-09-29 to 2020-12-29
-2026-03-30 15:48:54,561 - INFO - Using device: cuda
-2026-03-30 15:48:54,562 - INFO - Building models...

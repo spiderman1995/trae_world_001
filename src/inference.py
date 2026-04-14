@@ -57,7 +57,7 @@ class Predictor:
         
         with torch.no_grad():
             for seq_data, targets in tqdm(loader, desc="Predicting"):
-                # seq_data: [1, 180, 18, 1442]
+                # seq_data: [1, 180, 18, 1424]
                 B, Seq, C, L = seq_data.shape
                 seq_data_flat = seq_data.view(B * Seq, C, L).to(self.device)
                 
@@ -66,32 +66,26 @@ class Predictor:
                 features_seq = features_flat.view(B, Seq, -1)
                 outputs = self.vit_model(features_seq)
                 
-                # Parse outputs
-                pred_max_value_ratio = outputs['max_value'].item()
-                pred_min_value_ratio = outputs['min_value'].item()
+                # Parse outputs — 模型输出为收益率 (return = price/base - 1)
+                pred_max_return = outputs['max_value'].item()
+                pred_min_return = outputs['min_value'].item()
                 pred_max_day = torch.softmax(outputs['max_day'], dim=1).argmax(dim=1).item()
                 pred_min_day = torch.softmax(outputs['min_day'], dim=1).argmax(dim=1).item()
-                
-                # Get context info
-                # We need to find which stock/date this batch corresponds to
-                # Since we iterate sequentially, we can map back if needed, 
-                # or modify dataset to return metadata.
-                # For simplicity here, we just return the predictions and targets.
-                
+
                 current_price = targets['current_price'].item()
-                
+
                 results.append({
                     'current_price': current_price,
-                    'pred_max_value_ratio': pred_max_value_ratio,
-                    'pred_min_value_ratio': pred_min_value_ratio,
-                    'pred_max_value': current_price * pred_max_value_ratio,
-                    'pred_min_value': current_price * pred_min_value_ratio,
+                    'pred_max_return': pred_max_return,
+                    'pred_min_return': pred_min_return,
+                    'pred_max_value': current_price * (1.0 + pred_max_return),
+                    'pred_min_value': current_price * (1.0 + pred_min_return),
                     'pred_max_day': pred_max_day,
                     'pred_min_day': pred_min_day,
-                    'target_max_value_ratio': targets['max_value'].item(),
-                    'target_min_value_ratio': targets['min_value'].item(),
-                    'target_max_value': targets['max_value'].item() * current_price,
-                    'target_min_value': targets['min_value'].item() * current_price,
+                    'target_max_return': targets['max_value'].item(),
+                    'target_min_return': targets['min_value'].item(),
+                    'target_max_value': current_price * (1.0 + targets['max_value'].item()),
+                    'target_min_value': current_price * (1.0 + targets['min_value'].item()),
                     'target_max_day': targets['max_day'].item(),
                     'target_min_day': targets['min_day'].item()
                 })

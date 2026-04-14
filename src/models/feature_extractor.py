@@ -75,7 +75,7 @@ class FeatureExtractor(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x):
-        # x shape: [Batch * SeqLen, 18, 1442]
+        # x shape: [Batch * SeqLen, 18, 1424]
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)

@@ -9,23 +9,48 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 from .chinext50 import get_chinext50_constituents
 
+# ---------------------------------------------------------------------------
+# 尾盘集合竞价零行处理
+# 原始 CSV 每天 1442 tick (9:30~15:00, 每10秒)
+# 其中 14:57:00~14:59:50 (index 1423~1440, 共18行) 为集合竞价期间零行
+# 15:00:00 (index 1441) 为集合竞价结果，保留
+# 加载后自动裁剪为 1424 tick，供网络使用
+# ---------------------------------------------------------------------------
+RAW_TICKS = 1442
+AUCTION_ZERO_START = 1423  # 14:57:00
+AUCTION_ZERO_END = 1441    # 14:59:50 (exclusive end for slice)
+CLEAN_TICKS = RAW_TICKS - (AUCTION_ZERO_END - AUCTION_ZERO_START)  # 1424
+
+
+def trim_auction_zeros(arr):
+    """去除集合竞价零行。arr 可以是 [1442, 18] 或 [18, 1442]（按 axis=-1 裁剪）。"""
+    return np.concatenate([arr[..., :AUCTION_ZERO_START], arr[..., AUCTION_ZERO_END:]], axis=-1)
+
+
 class StockDataset(Dataset):
-    def __init__(self, data_dir, seq_len=180, pred_len=60, start_date=None, end_date=None, mean=None, std=None):
+    def __init__(self, data_dir, seq_len=180, pred_len=60, start_date=None, end_date=None,
+                 mean=None, std=None, stock_ids=None):
         """
         Args:
             data_dir (str): Path to directory containing daily_summary_YYYY-MM-DD.csv files.
             seq_len (int): Input sequence length (days). Default 180.
-            pred_len (int): Prediction horizon (days). Default 40 (approx 2 months).
+            pred_len (int): Prediction horizon (days). Default 60.
             start_date (str): Filter data starting from this date (YYYY-MM-DD).
             end_date (str): Filter data up to this date (YYYY-MM-DD).
             mean (Tensor): Pre-computed mean for normalization.
             std (Tensor): Pre-computed std for normalization.
+            stock_ids (list): Stock IDs to include. None = fallback to ChiNext50.
         """
         self.data_dir = data_dir
         self.seq_len = seq_len
         self.pred_len = pred_len
         self.start_date = pd.to_datetime(start_date) if start_date else None
         self.end_date = pd.to_datetime(end_date) if end_date else None
+        # 股票池：外部传入或回退到 ChiNext50
+        if stock_ids is not None:
+            self.stock_ids = set(str(s) for s in stock_ids)
+        else:
+            self.stock_ids = set(get_chinext50_constituents())
         
         # 1. Get file list
         self.filtered_files = self._get_filtered_files()
@@ -91,9 +116,9 @@ class StockDataset(Dataset):
         total_sum = np.zeros(18)
         total_sq_sum = np.zeros(18)
         total_count = 0
-        
-        valid_stocks = set(get_chinext50_constituents())
-        
+
+        valid_stocks = self.stock_ids
+
         for f in tqdm(safe_files, desc="Streaming Stats"):
             try:
                 df = pd.read_csv(f)
@@ -104,13 +129,15 @@ class StockDataset(Dataset):
 
                 feature_cols = [c for c in df.columns if c not in ("StockID", "Time")]
 
-                # Per-stock validation: only include stocks with exactly 1442 finite rows
+                # Per-stock validation: accept 1442 raw ticks, trim auction zeros to 1424
                 for _, grp in df.groupby('StockID'):
-                    if len(grp) != 1442:
+                    if len(grp) != RAW_TICKS:
                         continue
-                    stock_arr = grp[feature_cols].to_numpy()
+                    stock_arr = grp[feature_cols].to_numpy()  # [1442, 18]
                     if not np.isfinite(stock_arr).all():
                         continue
+                    # 裁掉集合竞价零行: [1442, 18] → [1424, 18]
+                    stock_arr = np.concatenate([stock_arr[:AUCTION_ZERO_START], stock_arr[AUCTION_ZERO_END:]], axis=0)
                     stock_arr[:, :6] = np.log1p(stock_arr[:, :6])
                     total_sum += np.sum(stock_arr, axis=0)
                     total_sq_sum += np.sum(stock_arr**2, axis=0)
@@ -213,9 +240,8 @@ class StockDataset(Dataset):
             return {}
             
         stock_data = {}
-        
-        # Get ChiNext 50 constituents
-        valid_stocks = set(get_chinext50_constituents())
+
+        valid_stocks = self.stock_ids
 
         day_stats = []
         
@@ -243,14 +269,14 @@ class StockDataset(Dataset):
             day_stats.append({
                 "date": current_date,
                 "file_stocks": len(set(stock_ids)),
-                "chinext50_hits": len(hits),
+                "pool_hits": len(hits),
                 "format": fmt,
                 "sample_raw": [str(x) for x in raw_unique[:10]],
                 "sample_norm": [str(x) for x in stock_ids[:10]],
             })
             if len(hits) == 0:
                 logger.warning(
-                    "No ChiNext50 stocks matched on date=%s file=%s. raw_sample=%s format_stats=%s",
+                    "No stocks from pool matched on date=%s file=%s. raw_sample=%s format_stats=%s",
                     str(current_date)[:10],
                     [str(x) for x in raw_unique[:10]],
                     source_file,
@@ -298,19 +324,28 @@ class StockDataset(Dataset):
                     )
                     raise ValueError(f"Non-finite feature values in file={source_file} date={str(current_date)[:10]} stock_id={stock_id}")
                 
-                # Ensure fixed size 1442
-                if feats.shape[0] != 1442:
+                # Ensure raw size 1442 (or already trimmed 1424)
+                if feats.shape[0] == RAW_TICKS:
+                    pass  # will trim below
+                elif feats.shape[0] == CLEAN_TICKS:
+                    pass  # already clean
+                else:
                     logger.error(
-                        "Invalid tick row count for stock/day. Expect 1442. file=%s date=%s stock_id=%s rows=%d",
+                        "Invalid tick row count for stock/day. Expect %d or %d. file=%s date=%s stock_id=%s rows=%d",
+                        RAW_TICKS, CLEAN_TICKS,
                         source_file,
                         str(current_date)[:10],
                         stock_id,
                         feats.shape[0],
                     )
                     raise ValueError(f"Invalid tick row count in file={source_file} date={str(current_date)[:10]} stock_id={stock_id} rows={feats.shape[0]}")
-                
+
                 # Transpose to [C, L]
-                feats = feats.T
+                feats = feats.T  # [18, 1442] or [18, 1424]
+
+                # 裁掉集合竞价零行（如果是原始1442）
+                if feats.shape[1] == RAW_TICKS:
+                    feats = trim_auction_zeros(feats)  # [18, 1424]
                 
                 if stock_id not in stock_data:
                     stock_data[stock_id] = {'data': [], 'dates': []}
@@ -328,7 +363,7 @@ class StockDataset(Dataset):
                 }
 
         if day_stats:
-            zero_days = [str(d["date"])[:10] for d in day_stats if d["chinext50_hits"] == 0]
+            zero_days = [str(d["date"])[:10] for d in day_stats if d["pool_hits"] == 0]
             logger.info(
                 "Dataset summary: days=%d, zero_hit_days=%d, kept_stocks=%d, date_range=%s..%s",
                 len(day_stats),
@@ -338,7 +373,7 @@ class StockDataset(Dataset):
                 str(day_stats[-1]["date"])[:10],
             )
             if zero_days:
-                logger.warning("Zero ChiNext50-hit dates (first 20): %s", zero_days[:20])
+                logger.warning("Zero pool-hit dates (first 20): %s", zero_days[:20])
 
         return final_stock_data
         
@@ -395,20 +430,22 @@ class StockDataset(Dataset):
         # We use Feature 2 for price-related calculations.
         
         # Get Current Price (Last tick of last input day)
-        # input_seq: [Seq, C, L] -> [180, 18, 1442]
-        # Last day: input_seq[-1] -> [18, 1442]
+        # input_seq: [Seq, C, L] -> [seq_len, 18, 1424]
+        # Last day: input_seq[-1] -> [18, 1424]
         # Last tick: input_seq[-1, 2, -1] (Using avg_trade_price)
         
-        current_price = input_seq[-1, 2, -1] + 1e-6 # Avoid div by zero
-        
+        # 基准价：最后一个 tick（集合竞价结果 15:00:00）
+        current_price = input_seq[-1, 2, -1] + 1e-6
+
+        # 数据已在预处理阶段去除集合竞价零行，可直接取 max/min
         daily_max = target_seq[:, 2, :].max(axis=1)
         daily_min = target_seq[:, 2, :].min(axis=1)
-        
+
         max_day = int(np.argmax(daily_max))
         min_day = int(np.argmin(daily_min))
-        
-        max_value = daily_max[max_day] / current_price
-        min_value = daily_min[min_day] / current_price
+
+        max_value = daily_max[max_day] / current_price - 1.0  # 收益率，中心在0附近
+        min_value = daily_min[min_day] / current_price - 1.0
         
         # Standardize input_seq for model input
         input_data = input_seq.copy()

@@ -15,7 +15,7 @@ dot.attr('edge', **arrow_style, fontname='Microsoft YaHei')
 # --- 阶段一: 1D-CNN FeatureExtractor ---
 with dot.subgraph(name='cluster_cnn') as c:
     c.attr(label='阶段一: FeatureExtractor (1D ResNet)', **subgraph_style)
-    c.node('input_cnn', label='<<B>输入 (日内高频数据)</B><BR/>Shape: [B, 18, 1442]>', shape='cylinder', fillcolor='#fdecdf')
+    c.node('input_cnn', label='<<B>输入 (日内高频数据)</B><BR/>Shape: [B, 18, 1424]>', shape='cylinder', fillcolor='#fdecdf')
     c.node('conv1', label='<Conv1d<BR/>MaxPool1d>')
     c.node('layer1', label='<ResNet Layer 1<BR/>(多个 BasicBlock1D)>')
     c.node('layer2', label='<ResNet Layer 2<BR/>(stride=2)>')

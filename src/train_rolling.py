@@ -18,6 +18,8 @@ import numpy as np
 import glob
 
 from src.data.dataset import StockDataset
+from src.data.stock_pool import StockPool
+from src.data.chinext50 import get_chinext50_constituents
 from src.models.feature_extractor import FeatureExtractor
 from src.models.transformer import StockViT
 from src.models.loss import MultiTaskLoss, PeakDayLoss
@@ -128,16 +130,32 @@ def get_period_by_day_range(dates, day_range):
         dates[end_day - 1].strftime("%Y-%m-%d"),
     )
 
-def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range, test_range, checkpoint_path=None):
+def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range, test_range,
+                   checkpoint_path=None, stock_pool=None):
     fold_dir = os.path.join(args.output_dir, f"fold_{fold_idx}")
     os.makedirs(fold_dir, exist_ok=True)
-    
+
     logger = setup_logging(fold_dir, fold_idx)
     logger.info(f"=== Starting Fold {fold_idx} ===")
     logger.info(f"Train Days: {train_range[0]} to {train_range[1]}")
     logger.info(f"Test Days: {test_range[0]} to {test_range[1]}")
     logger.info(f"Train Period: {train_period[0]} to {train_period[1]}")
     logger.info(f"Test Period: {test_period[0]} to {test_period[1]}")
+
+    # 股票采样
+    if args.stock_pool == "random" and stock_pool is not None:
+        sampled_stocks = stock_pool.sample_stocks(
+            n=args.num_stocks,
+            start_date=train_period[0],
+            end_date=test_period[1],
+            min_trading_days=args.seq_len + args.pred_len,
+            stock_prefix=("30", "31"),
+            seed=args.seed + fold_idx,
+        )
+        logger.info(f"Random sampled {len(sampled_stocks)} stocks for this fold.")
+    else:
+        sampled_stocks = list(get_chinext50_constituents())
+        logger.info(f"Using ChiNext50 ({len(sampled_stocks)} stocks).")
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
@@ -171,7 +189,7 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
     mtl_loss_wrapper = MultiTaskLoss(num_tasks=4).to(device)
     
     criterion_day = PeakDayLoss(sigma=args.day_sigma)
-    criterion_value = nn.SmoothL1Loss()
+    criterion_value = nn.SmoothL1Loss(beta=args.smooth_l1_beta)
     
     params = list(feature_extractor.parameters()) + list(vit_model.parameters()) + list(mtl_loss_wrapper.parameters())
     optimizer = optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
@@ -193,7 +211,8 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
         seq_len=args.seq_len,
         pred_len=args.pred_len,
         start_date=train_period[0],
-        end_date=train_period[1]
+        end_date=train_period[1],
+        stock_ids=sampled_stocks,
     )
     train_size = len(train_dataset)
     num_train_stocks = len(set(idx[0] for idx in train_dataset.indices))
@@ -203,9 +222,13 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
         raise ValueError(
             f"Empty train dataset. data_dir={args.data_dir}, train_days={train_range}, "
             f"train_period={train_period[0]}..{train_period[1]}, seq_len={args.seq_len}, pred_len={args.pred_len}. "
-            f"Check logs for ChiNext50 hit and StockID normalization diagnostics."
+            f"Check logs for stock pool hit and StockID normalization diagnostics."
         )
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0, pin_memory=True)
+    train_loader = DataLoader(
+        train_dataset, batch_size=args.batch_size, shuffle=True,
+        num_workers=args.num_workers, pin_memory=True,
+        persistent_workers=args.num_workers > 0, prefetch_factor=2 if args.num_workers > 0 else None,
+    )
 
     logger.info("Preparing validation dataset...")
     eval_range = (max(1, test_range[0] - args.seq_len), test_range[1])
@@ -219,7 +242,8 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
         start_date=eval_period[0],
         end_date=eval_period[1],
         mean=train_dataset.mean,
-        std=train_dataset.std
+        std=train_dataset.std,
+        stock_ids=sampled_stocks,
     )
     test_size = len(val_dataset)
     logger.info(f"Val dataset size: {test_size}")
@@ -229,7 +253,11 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
             f"test_period={test_period[0]}..{test_period[1]}, eval_days={eval_range}, eval_period={eval_period[0]}..{eval_period[1]}, "
             f"seq_len={args.seq_len}, pred_len={args.pred_len}."
         )
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True)
+    val_loader = DataLoader(
+        val_dataset, batch_size=args.batch_size, shuffle=False,
+        num_workers=args.num_workers, pin_memory=True,
+        persistent_workers=args.num_workers > 0, prefetch_factor=2 if args.num_workers > 0 else None,
+    )
 
     global_step = 0
     best_val_loss = float("inf")
@@ -289,6 +317,12 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
 
             if batch_idx % 10 == 0:
                 writer.add_scalar("Train/Loss_step", total_loss.item(), global_step)
+                writer.add_scalar("Train/loss_max_value", loss_max_value.item(), global_step)
+                writer.add_scalar("Train/loss_min_value", loss_min_value.item(), global_step)
+                writer.add_scalar("Train/loss_max_day", loss_max_day.item(), global_step)
+                writer.add_scalar("Train/loss_min_day", loss_min_day.item(), global_step)
+                for i, name in enumerate(["max_val", "min_val", "max_day", "min_day"]):
+                    writer.add_scalar(f"Train/log_var_{name}", mtl_loss_wrapper.log_vars[i].item(), global_step)
             pbar.set_postfix({"Loss": f"{total_loss.item():.4f}"})
 
         mean_train_loss = epoch_train_loss / max(epoch_train_steps, 1)
@@ -431,7 +465,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--seq_len", type=int, default=60) 
+    parser.add_argument("--seq_len", type=int, default=180)
     parser.add_argument("--pred_len", type=int, default=60)
     parser.add_argument("--depth", type=int, default=4)
     parser.add_argument("--num_heads", type=int, default=4)
@@ -439,7 +473,7 @@ def main():
     parser.add_argument("--topk", type=int, default=3)
     
     # For tuning
-    parser.add_argument("--train_days", type=int, default=180)
+    parser.add_argument("--train_days", type=int, default=480)
     parser.add_argument("--test_days", type=int, default=60)
     parser.add_argument("--step_days", type=int, default=10)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
@@ -454,10 +488,25 @@ def main():
     parser.add_argument("--resume_from", type=str, default=None, help="Path to a model checkpoint to start training from (for the first fold).")
     parser.add_argument("--start_date", type=str, default=None, help="Start date for training data (YYYY-MM-DD)")
     parser.add_argument("--end_date", type=str, default=None, help="End date for training data (YYYY-MM-DD)")
+    # 股票采样
+    parser.add_argument("--stock_pool", type=str, default="random", choices=["random", "chinext50"],
+                        help="Stock sampling strategy: random (sample from all), chinext50 (fixed 50)")
+    parser.add_argument("--num_stocks", type=int, default=50, help="Number of stocks to sample per fold (when stock_pool=random)")
+    # 数据加载
+    parser.add_argument("--num_workers", type=int, default=4, help="DataLoader num_workers (0=main thread)")
+    # Loss
+    parser.add_argument("--smooth_l1_beta", type=float, default=0.1, help="SmoothL1Loss beta (transition point from L2 to L1)")
 
     args = parser.parse_args()
     set_seed(args.seed)
-    
+
+    # 参数校验
+    if args.train_days < args.seq_len + args.pred_len:
+        raise ValueError(
+            f"train_days({args.train_days}) must >= seq_len+pred_len({args.seq_len + args.pred_len}). "
+            f"Each sample needs {args.seq_len + args.pred_len} consecutive days."
+        )
+
     dates = get_sorted_dates(args.data_dir)
     # 根据参数过滤日期
     if args.start_date:
@@ -469,7 +518,13 @@ def main():
         raise ValueError("No data available in the specified date range.")
 
     folds = build_day_range_folds(dates, args.train_days, args.test_days, args.step_days)
-    
+
+    # 初始化股票池（只扫描一次，所有fold共用）
+    pool = None
+    if args.stock_pool == "random":
+        print("Scanning stock pool (one-time)...")
+        pool = StockPool(args.data_dir, start_date=args.start_date, end_date=args.end_date)
+
     previous_model_path = args.resume_from
     fold_summaries = []
     for i, fold in enumerate(folds):
@@ -482,7 +537,8 @@ def main():
             fold["test_period"],
             fold["train_range"],
             fold["test_range"],
-            checkpoint_path=previous_model_path
+            checkpoint_path=previous_model_path,
+            stock_pool=pool,
         )
         previous_model_path = model_save_path # Update for the next fold
         fold_summaries.append({

@@ -119,8 +119,8 @@ def train(args):
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}", unit="batch", leave=True)
         
         for batch_idx, (seq_data, targets) in enumerate(pbar):
-            # seq_data: [B, 180, 18, 1442]
-            # Reshape for CNN: [B*180, 18, 1442]
+            # seq_data: [B, 180, 18, 1424]
+            # Reshape for CNN: [B*180, 18, 1424]
             B, Seq, C, L = seq_data.shape
             
             # Move to device

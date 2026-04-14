@@ -36,6 +36,7 @@ from tqdm import tqdm
 from src.models.feature_extractor import FeatureExtractor
 from src.models.transformer import StockViT
 from src.data.chinext50 import get_chinext50_constituents
+from src.data.dataset import RAW_TICKS, CLEAN_TICKS, trim_auction_zeros
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +69,7 @@ def get_sorted_dates(data_dir):
 def load_stock_data(data_dir, load_dates, valid_stocks):
     """
     读取指定日期列表的 CSV 文件，返回：
-        {stock_id: {"dates": [pd.Timestamp, ...], "data": np.ndarray [Days, 18, 1442]}}
+        {stock_id: {"dates": [pd.Timestamp, ...], "data": np.ndarray [Days, 18, 1424]}}
     """
     stock_buf = {}
 
@@ -91,9 +92,11 @@ def load_stock_data(data_dir, load_dates, valid_stocks):
                     continue
 
                 feats = grp[feature_cols].to_numpy(dtype=np.float32)
-                if feats.shape[0] != 1442:
+                if feats.shape[0] not in (RAW_TICKS, CLEAN_TICKS):
                     continue
-                feats = feats.T  # [18, 1442]
+                feats = feats.T  # [18, 1442] or [18, 1424]
+                if feats.shape[1] == RAW_TICKS:
+                    feats = trim_auction_zeros(feats)  # [18, 1424]
 
                 if sid not in stock_buf:
                     stock_buf[sid] = {"dates": [], "data": []}
@@ -119,7 +122,7 @@ def load_stock_data(data_dir, load_dates, valid_stocks):
 # ---------------------------------------------------------------------------
 
 def normalize(arr, mean, std):
-    """arr: [seq_len, 18, 1442]"""
+    """arr: [seq_len, 18, 1424]"""
     arr = arr.copy()
     arr[:, :6, :] = np.log1p(arr[:, :6, :])
     if mean is not None and std is not None:

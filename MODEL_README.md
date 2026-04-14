@@ -37,8 +37,8 @@ project3_1dcnn_vit_trae/
 
 - 文件命名：`daily_summary_YYYY-MM-DD.csv`
 - 列结构：`StockID + Time + 18个特征列`
-- 每只股票每天固定 **1442 行** tick
-- 单日单股票张量（转置后）：`[18, 1442]`，即 `[C, L]`
+- 每只股票每天固定 **1424 行** tick
+- 单日单股票张量（转置后）：`[18, 1424]`，即 `[C, L]`
 
 ### 2.2 18个特征（列索引与语义）
 
@@ -79,7 +79,7 @@ project3_1dcnn_vit_trae/
 1. **预检查**：逐文件 `read_csv(nrows=5)`，读取失败则跳过（warning，继续下一文件）
 2. **流式累计**：对通过预检查的文件逐一读取：
    - 过滤为创业板50股票（`get_chinext50_constituents()`）
-   - 按股票分组，**仅保留 tick 数恰好为 1442 且无 NaN/Inf 的股票**（与 `_load_data` 校验口径一致）
+   - 按股票分组，**仅保留 tick 数恰好为 1424 且无 NaN/Inf 的股票**（与 `_load_data` 校验口径一致）
    - 前6列做 `log1p`
    - 累加 `total_sum / total_sq_sum / total_count`
    - 读取后丢弃，不占内存
@@ -103,19 +103,19 @@ project3_1dcnn_vit_trae/
 
 **Phase 2 — 逐日处理（无 try/except，异常直接中断整个加载）**：
 - StockID 不是6位纯数字格式 → raise ValueError，**中断**
-- 某只股票/某天的 tick 行数不等于1442 → raise ValueError，**中断**
+- 某只股票/某天的 tick 行数不等于1424 → raise ValueError，**中断**
 - 某只股票/某天特征含非有限值 → raise ValueError，**中断**
 
 通过校验后：
 - 过滤，仅保留创业板50股票
-- 每日每股转置为 `[18, 1442]`
-- 按 `stock_id → {data: [Days, 18, 1442], dates: [Date]}` 组织内存
+- 每日每股转置为 `[18, 1424]`
+- 按 `stock_id → {data: [Days, 18, 1424], dates: [Date]}` 组织内存
 
 ### 3.4 训练样本与标签（`__getitem__`）
 
 ```
-input_seq  = data[start : start+seq_len]    # [seq_len, 18, 1442]
-target_seq = data[start+seq_len : start+seq_len+pred_len]  # [pred_len, 18, 1442]
+input_seq  = data[start : start+seq_len]    # [seq_len, 18, 1424]
+target_seq = data[start+seq_len : start+seq_len+pred_len]  # [pred_len, 18, 1424]
 ```
 
 **标签计算（使用特征2：avg_trade_price）**：
@@ -137,7 +137,7 @@ min_value = daily_min[min_day] / current_price       # 最低价格比率
 
 **返回值**：
 ```python
-torch.FloatTensor(input_data),   # [seq_len, 18, 1442]
+torch.FloatTensor(input_data),   # [seq_len, 18, 1424]
 {
   'max_value': float,            # 最高价格比率（相对current_price）
   'min_value': float,            # 最低价格比率
@@ -170,7 +170,7 @@ Tanh()  →  输出范围 (-1, 1)
 `BasicBlock1D`：标准ResNet残差块，`Conv1d(k=3) + BN + ReLU + Conv1d(k=3) + BN + skip`
 
 **输入/输出**：
-- 输入（展平后）：`[B × Seq, 18, 1442]`
+- 输入（展平后）：`[B × Seq, 18, 1424]`
 - 输出：`[B × Seq, 1024]`
 
 ### 4.2 StockViT 时序建模（`transformer.py`）
