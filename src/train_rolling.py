@@ -21,6 +21,7 @@ from src.data.dataset import StockDataset
 from src.models.feature_extractor import FeatureExtractor
 from src.models.transformer import StockViT
 from src.models.loss import MultiTaskLoss, PeakDayLoss
+from src.config import DATA_DIR
 
 # Setup Logging
 def setup_logging(output_dir, fold_idx=0):
@@ -425,7 +426,7 @@ def validate(feature_extractor, vit_model, mtl_loss_wrapper, loader, device, cri
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", type=str, default=r"D:\temp\0_tempdata8")
+    parser.add_argument("--data_dir", type=str, default=DATA_DIR)
     parser.add_argument("--output_dir", type=str, default="runs_rolling")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=16)

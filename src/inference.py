@@ -100,9 +100,10 @@ class Predictor:
 
 if __name__ == "__main__":
     # Example usage
+    from src.config import DATA_DIR
     predictor = Predictor(
         checkpoint_path="runs/model_epoch_1.pth",
-        data_dir=r"D:\temp\0_tempdata7"
+        data_dir=DATA_DIR
     )
     df = predictor.predict()
     print(df.head())
