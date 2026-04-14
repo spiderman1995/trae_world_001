@@ -10,6 +10,7 @@ import glob
 import logging
 import random
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import numpy as np
@@ -60,29 +61,34 @@ class StockPool:
             logger.warning("No CSV files found in date range.")
             return {}
 
-        logger.info(f"StockPool: scanning {len(filtered)} files for stock availability...")
+        logger.info(f"StockPool: scanning {len(filtered)} files for stock availability (8 threads)...")
 
-        availability = {}  # stock_id -> set of dates
+        normalize = self._normalize_id
 
-        for fpath, fdate in tqdm(filtered, desc="Scanning stocks"):
+        def _scan_one(args):
+            fpath, fdate = args
             try:
                 df = pd.read_csv(fpath, usecols=["StockID"])
-            except Exception as e:
-                logger.warning(f"Skipping {fpath}: {e}")
-                continue
-
-            # 统计每只股票的行数
+            except Exception:
+                return []
             counts = df["StockID"].value_counts()
+            results = []
             for raw_id, cnt in counts.items():
-                stock_id = self._normalize_id(raw_id)
-                if stock_id is None:
-                    continue
-                # 只接受 1442 tick 的完整交易日
                 if cnt != 1442:
                     continue
-                if stock_id not in availability:
-                    availability[stock_id] = set()
-                availability[stock_id].add(fdate)
+                stock_id = normalize(raw_id)
+                if stock_id is not None:
+                    results.append((stock_id, fdate))
+            return results
+
+        availability = {}
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {executor.submit(_scan_one, item): item for item in filtered}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Scanning stocks"):
+                for stock_id, fdate in future.result():
+                    if stock_id not in availability:
+                        availability[stock_id] = set()
+                    availability[stock_id].add(fdate)
 
         logger.info(f"StockPool: found {len(availability)} unique stocks across {len(filtered)} days.")
         return availability
