@@ -228,10 +228,11 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
         )
     # Windows 下 num_workers>0 会因 Dataset 过大导致 pickle 失败，强制为 0
     dl_workers = 0 if platform.system() == "Windows" else args.num_workers
+    dl_kwargs = dict(num_workers=dl_workers, pin_memory=True)
+    if dl_workers > 0:
+        dl_kwargs.update(persistent_workers=True, prefetch_factor=2)
     train_loader = DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=True,
-        num_workers=dl_workers, pin_memory=True,
-        persistent_workers=dl_workers > 0, prefetch_factor=2 if dl_workers > 0 else None,
+        train_dataset, batch_size=args.batch_size, shuffle=True, **dl_kwargs,
     )
 
     logger.info("Preparing validation dataset...")
@@ -259,9 +260,7 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
             f"seq_len={args.seq_len}, pred_len={args.pred_len}."
         )
     val_loader = DataLoader(
-        val_dataset, batch_size=args.batch_size, shuffle=False,
-        num_workers=dl_workers, pin_memory=True,
-        persistent_workers=dl_workers > 0, prefetch_factor=2 if dl_workers > 0 else None,
+        val_dataset, batch_size=args.batch_size, shuffle=False, **dl_kwargs,
     )
 
     global_step = 0
