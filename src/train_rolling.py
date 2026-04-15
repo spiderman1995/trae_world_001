@@ -24,6 +24,7 @@ from src.models.feature_extractor import FeatureExtractor
 from src.models.transformer import StockViT
 from src.models.loss import MultiTaskLoss, PeakDayLoss
 from src.config import DATA_DIR
+import platform
 
 # Setup Logging
 def setup_logging(output_dir, fold_idx=0):
@@ -225,10 +226,12 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
             f"train_period={train_period[0]}..{train_period[1]}, seq_len={args.seq_len}, pred_len={args.pred_len}. "
             f"Check logs for stock pool hit and StockID normalization diagnostics."
         )
+    # Windows 下 num_workers>0 会因 Dataset 过大导致 pickle 失败，强制为 0
+    dl_workers = 0 if platform.system() == "Windows" else args.num_workers
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True,
-        num_workers=args.num_workers, pin_memory=True,
-        persistent_workers=args.num_workers > 0, prefetch_factor=2 if args.num_workers > 0 else None,
+        num_workers=dl_workers, pin_memory=True,
+        persistent_workers=dl_workers > 0, prefetch_factor=2 if dl_workers > 0 else None,
     )
 
     logger.info("Preparing validation dataset...")
@@ -257,8 +260,8 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
         )
     val_loader = DataLoader(
         val_dataset, batch_size=args.batch_size, shuffle=False,
-        num_workers=args.num_workers, pin_memory=True,
-        persistent_workers=args.num_workers > 0, prefetch_factor=2 if args.num_workers > 0 else None,
+        num_workers=dl_workers, pin_memory=True,
+        persistent_workers=dl_workers > 0, prefetch_factor=2 if dl_workers > 0 else None,
     )
 
     global_step = 0
