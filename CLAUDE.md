@@ -5,7 +5,7 @@ Trains on randomly sampled stocks from the full market (30/31 prefix), not limit
 
 ## Architecture
 
-- **1D-CNN** (`feature_extractor.py`): ResNet-style, `[18, 1424]` tick data -> embedding
+- **1D-CNN** (`feature_extractor.py`): ResNet-style, `[18, 1424]` tick data -> embedding. Uses spatial pooling (`AdaptiveAvgPool1d(pool_size)`) instead of global pooling to preserve time-position information. For `output_dim=1024`: `pool_size=2`, `512×2=1024`, no fc layer needed. For `output_dim=10000`: `pool_size=20`, `512×20=10240 → fc → 10000`.
 - **StockViT** (`transformer.py`): CLS-token ViT (encoder-only), 4 prediction heads (max_value, min_value, max_day, min_day)
 - **embed_dim = 1024** hardcoded in both `train.py` and `train_rolling.py` (default in model class is 10000, never used)
 
@@ -16,6 +16,7 @@ Trains on randomly sampled stocks from the full market (30/31 prefix), not limit
 - Tensor shape per stock per day (after transpose): `[18, 1424]` i.e. `[C, L]`
 - Stock filtering: `--stock_pool random` (default, samples N stocks per fold) or `--stock_pool chinext50` (fallback)
 - Stock pool discovery: `src/data/stock_pool.py` scans CSVs for available stocks
+- Risk stock filters: `min_list_days=180` (IPO filter), `exclude_delisted=True`, `blacklist` (ST/*ST), `min_trading_days` (suspension)
 
 ## 18 Features - Critical Constraints
 

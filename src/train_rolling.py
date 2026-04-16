@@ -151,6 +151,8 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
             end_date=test_period[1],
             min_trading_days=args.seq_len + args.pred_len,
             stock_prefix=("30", "31"),
+            min_list_days=args.min_list_days,
+            exclude_delisted=True,
             seed=args.seed + fold_idx,
         )
         logger.info(f"Random sampled {len(sampled_stocks)} stocks for this fold.")
@@ -480,9 +482,9 @@ def main():
     parser.add_argument("--train_days", type=int, default=480)
     parser.add_argument("--test_days", type=int, default=60)
     parser.add_argument("--step_days", type=int, default=10)
-    parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--drop_ratio", type=float, default=0.1)
-    parser.add_argument("--attn_drop_ratio", type=float, default=0.1)
+    parser.add_argument("--weight_decay", type=float, default=5e-3)
+    parser.add_argument("--drop_ratio", type=float, default=0.2)
+    parser.add_argument("--attn_drop_ratio", type=float, default=0.2)
     parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--min_delta", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=42)
@@ -495,7 +497,8 @@ def main():
     # 股票采样
     parser.add_argument("--stock_pool", type=str, default="random", choices=["random", "chinext50"],
                         help="Stock sampling strategy: random (sample from all), chinext50 (fixed 50)")
-    parser.add_argument("--num_stocks", type=int, default=50, help="Number of stocks to sample per fold (when stock_pool=random)")
+    parser.add_argument("--num_stocks", type=int, default=500, help="Number of stocks to sample per fold (when stock_pool=random)")
+    parser.add_argument("--min_list_days", type=int, default=180, help="Exclude stocks listed less than N calendar days (IPO filter)")
     parser.add_argument("--sample_stride", type=int, default=10, help="Sample-level sliding window stride (days). Larger = less overlap, fewer samples")
     # 数据加载
     parser.add_argument("--num_workers", type=int, default=4, help="DataLoader num_workers (0=main thread)")

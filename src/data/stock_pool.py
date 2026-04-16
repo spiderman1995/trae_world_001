@@ -138,15 +138,26 @@ class StockPool:
         return None
 
     def get_available_stocks(self, start_date, end_date, min_trading_days=None,
-                             stock_prefix=None):
+                             stock_prefix=None, min_list_days=180,
+                             exclude_delisted=True, blacklist=None):
         """
         返回在 [start_date, end_date] 区间内满足条件的股票列表。
+
+        过滤规则：
+        1. stock_prefix: 代码前缀过滤（如30/31开头的创业板）
+        2. min_trading_days: 区间内最少交易天数（默认90%），过滤停牌过多的股票
+        3. min_list_days: 上市不满N天的排除（用首次出现日期近似IPO日期）
+        4. exclude_delisted: 排除已退市股票（末次交易日远早于数据末尾）
+        5. blacklist: 手动黑名单（ST/*ST等无法从数据自动识别的）
 
         Args:
             start_date: 区间起始日期
             end_date: 区间截止日期
             min_trading_days: 最少交易天数。None 则使用区间内所有交易日数的 90%。
             stock_prefix: 股票代码前缀过滤，如 ("30", "31")。None 不过滤。
+            min_list_days: 上市最少天数。股票首次出现距 start_date 不足此天数则排除。
+            exclude_delisted: 排除疑似退市/长期停牌股票（最后交易日早于数据末尾30个交易日）。
+            blacklist: 要排除的股票ID集合（如ST股票），None不排除。
 
         Returns:
             list of stock_id strings
@@ -163,24 +174,60 @@ class StockPool:
         if min_trading_days is None:
             min_trading_days = int(num_trading_days * 0.90)
 
+        # 数据中的最后一个交易日（用于退市判断）
+        global_last_date = max(all_trading_dates) if all_trading_dates else ed
+        # 退市阈值：最后交易日早于全局末尾30个交易日
+        sorted_all_dates = sorted(all_trading_dates)
+        delist_threshold = sorted_all_dates[-30] if len(sorted_all_dates) >= 30 else sorted_all_dates[0]
+
+        blacklist_set = set(blacklist) if blacklist else set()
+
         valid = []
+        excluded_reasons = {"prefix": 0, "blacklist": 0, "ipo": 0, "delisted": 0, "suspended": 0}
+
         for stock_id, dates in self.availability.items():
-            # 前缀过滤
+            # 1. 前缀过滤
             if stock_prefix and not any(stock_id.startswith(p) for p in stock_prefix):
+                excluded_reasons["prefix"] += 1
                 continue
-            # 区间内的交易天数
+
+            # 2. 黑名单（ST/*ST/手动排除）
+            if stock_id in blacklist_set:
+                excluded_reasons["blacklist"] += 1
+                continue
+
+            # 3. 上市不满 min_list_days 天（首次出现距 start_date 太近）
+            first_date = min(dates)
+            if (sd - first_date).days < min_list_days:
+                excluded_reasons["ipo"] += 1
+                continue
+
+            # 4. 退市/长期停牌（最后交易日远早于数据末尾）
+            if exclude_delisted:
+                last_date = max(dates)
+                if last_date < delist_threshold:
+                    excluded_reasons["delisted"] += 1
+                    continue
+
+            # 5. 停牌过多（区间内交易天数不足）
             days_in_range = sum(1 for d in dates if sd <= d <= ed)
-            if days_in_range >= min_trading_days:
-                valid.append(stock_id)
+            if days_in_range < min_trading_days:
+                excluded_reasons["suspended"] += 1
+                continue
+
+            valid.append(stock_id)
 
         logger.info(
-            f"StockPool: {len(valid)} stocks have >= {min_trading_days} trading days "
-            f"in [{start_date}, {end_date}] (total trading days: {num_trading_days})"
+            f"StockPool: {len(valid)} stocks passed all filters "
+            f"in [{start_date}, {end_date}] (trading days: {num_trading_days}). "
+            f"Excluded: {excluded_reasons}"
         )
         return sorted(valid)
 
     def sample_stocks(self, n=50, start_date=None, end_date=None,
-                      min_trading_days=None, stock_prefix=None, seed=42):
+                      min_trading_days=None, stock_prefix=None,
+                      min_list_days=180, exclude_delisted=True,
+                      blacklist=None, seed=42):
         """
         从可用股票中随机采样 n 只。
 
@@ -190,6 +237,9 @@ class StockPool:
             end_date: 区间截止
             min_trading_days: 最少交易天数
             stock_prefix: 前缀过滤，如 ("30", "31")
+            min_list_days: 上市最少天数（排除次新股）
+            exclude_delisted: 排除疑似退市/长期停牌
+            blacklist: 手动黑名单（如ST股票）
             seed: 随机种子（可复现）
 
         Returns:
@@ -200,6 +250,9 @@ class StockPool:
             end_date=end_date,
             min_trading_days=min_trading_days,
             stock_prefix=stock_prefix,
+            min_list_days=min_list_days,
+            exclude_delisted=exclude_delisted,
+            blacklist=blacklist,
         )
 
         if len(pool) <= n:

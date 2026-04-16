@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -34,26 +35,32 @@ class BasicBlock1D(nn.Module):
         return out
 
 class FeatureExtractor(nn.Module):
-    def __init__(self, input_channels=18, output_dim=10000):
+    def __init__(self, input_channels=18, output_dim=1024):
         super(FeatureExtractor, self).__init__()
-        
+
         self.inplanes = 64
         self.conv1 = nn.Conv1d(input_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
         self.bn1 = nn.BatchNorm1d(64)
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
-        
+
         # ResNet Layers
         self.layer1 = self._make_layer(64, 2)
         self.layer2 = self._make_layer(128, 2, stride=2)
         self.layer3 = self._make_layer(256, 2, stride=2)
         self.layer4 = self._make_layer(512, 2, stride=2)
-        
-        self.avgpool = nn.AdaptiveAvgPool1d(1)
-        
-        # Projection to 10000 dims
-        self.fc = nn.Linear(512 * BasicBlock1D.expansion, output_dim)
-        
+
+        # 保留空间维度：pool 到 pool_size 而非 1，避免信息瓶颈
+        # layer4 输出 [B, 512, 45]，pool 后 [B, 512, pool_size]
+        # flatten 后 512 * pool_size 维，每维对应不同通道×不同时间段
+        backbone_channels = 512 * BasicBlock1D.expansion
+        self.pool_size = math.ceil(output_dim / backbone_channels)
+        self.avgpool = nn.AdaptiveAvgPool1d(self.pool_size)
+
+        flat_dim = backbone_channels * self.pool_size
+        # 仅在 flat_dim != output_dim 时需要投射层
+        self.fc = nn.Linear(flat_dim, output_dim) if flat_dim != output_dim else None
+
         # Output activation to ensure (-1, 1)
         self.output_act = nn.Tanh()
 
@@ -86,9 +93,10 @@ class FeatureExtractor(nn.Module):
         x = self.layer3(x)
         x = self.layer4(x)
 
-        x = self.avgpool(x)
-        x = torch.flatten(x, 1)
-        x = self.fc(x)
-        x = self.output_act(x) # Tanh -> (-1, 1)
-        
+        x = self.avgpool(x)       # [B, 512, pool_size]
+        x = torch.flatten(x, 1)   # [B, 512 * pool_size]
+        if self.fc is not None:
+            x = self.fc(x)
+        x = self.output_act(x)
+
         return x
