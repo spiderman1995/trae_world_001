@@ -182,6 +182,11 @@ class StockPool:
 
         blacklist_set = set(blacklist) if blacklist else set()
 
+        # 数据最早日期：如果股票首次出现在数据开头附近（前10个交易日），
+        # 说明该股票在数据收录前就已上市，不应被 IPO 过滤误杀
+        global_first_date = sorted_all_dates[0] if sorted_all_dates else sd
+        data_start_margin = sorted_all_dates[min(10, len(sorted_all_dates) - 1)] if sorted_all_dates else sd
+
         valid = []
         excluded_reasons = {"prefix": 0, "blacklist": 0, "ipo": 0, "delisted": 0, "suspended": 0}
 
@@ -197,8 +202,9 @@ class StockPool:
                 continue
 
             # 3. 上市不满 min_list_days 天（首次出现距 start_date 太近）
+            #    但如果股票在数据最早期就已存在，说明它早于数据收录，跳过此过滤
             first_date = min(dates)
-            if (sd - first_date).days < min_list_days:
+            if first_date > data_start_margin and (sd - first_date).days < min_list_days:
                 excluded_reasons["ipo"] += 1
                 continue
 

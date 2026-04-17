@@ -1,0 +1,112 @@
+================================================================================
+2026-04-17  版本更新记录
+================================================================================
+
+A：不兼容性改动（旧checkpoint无法直接加载，需重新训练）
+
+1. FeatureExtractor 空间池化改造
+   - AdaptiveAvgPool1d(1) → AdaptiveAvgPool1d(pool_size)
+   - output_dim=1024 时 pool_size=2，512×2=1024，去掉了 fc 层
+   - 解决全局池化压缩到512维后用fc硬扩维导致的特征冗余
+   - 改动文件：src/models/feature_extractor.py
+
+2. 标签从价格比率改为收益率（前次更新，本次文档同步）
+   - max_value = daily_max / current_price - 1.0（原来没有 -1.0）
+   - 推理需还原：pred_price = current_price × (1 + pred_return)
+   - 改动文件：src/data/dataset.py, src/inference.py
+
+B：兼容性改动（不影响已有checkpoint，可直接使用）
+
+1. 股票池风险过滤
+   - 新增 min_list_days=180：排除上市不满180天的次新股
+   - 新增 exclude_delisted=True：排除疑似退市/长期停牌（最后交易日早于数据末尾30个交易日）
+   - 新增 blacklist 参数：手动排除 ST/*ST 股票
+   - 改动文件：src/data/stock_pool.py, src/train_rolling.py
+
+2. 修复 IPO 过滤误杀 bug
+   - 如果股票在数据最早期就存在（数据前10个交易日内），说明早于数据收录已上市，跳过IPO过滤
+   - 原逻辑会把数据起始日附近的所有股票全部排除，导致训练集为空
+   - 改动文件：src/data/stock_pool.py
+
+3. 抗过拟合参数调整（默认值变更）
+   - weight_decay：1e-4 → 5e-3（加强L2正则化）
+   - drop_ratio：0.1 → 0.2（ViT前向dropout加大）
+   - attn_drop_ratio：0.1 → 0.2（注意力dropout加大）
+   - num_stocks：50 → 500（更多股票=更多样本多样性）
+   - 改动文件：src/train_rolling.py
+
+4. prefetch_factor 兼容性修复
+   - PyTorch 1.10.1 在 num_workers=0 时不接受 prefetch_factor（即使传None也报错）
+   - 改为 dl_kwargs 字典，仅 num_workers>0 时才传入 persistent_workers 和 prefetch_factor
+   - 改动文件：src/train_rolling.py
+
+5. 代码清理
+   - 删除5处无用import（transformer.py, feature_extractor.py, loss.py, dataset.py, chinext50.py）
+   - 删除 requirements.txt 中未使用的 scikit-learn 依赖
+   - 改动文件：5个.py + requirements.txt
+
+6. MODEL_README.md 全面重写
+   - 修正约10处与代码不一致的描述
+   - 补充股票池过滤、空间池化、TensorBoard子loss监控等新功能文档
+
+================================================================================
+2026-04-13  版本更新记录
+================================================================================
+
+A：不兼容性改动
+
+1. seq_len 60→180，输入序列从60天扩展到180天
+   - 每个样本需要 180+60=240 天连续数据
+   - ViT pos_embed shape 从 [1,61,1024] 变为 [1,181,1024]
+   - 改动文件：src/train_rolling.py
+
+2. 目标值从价格比率改为收益率
+   - max_value = daily_max / current_price - 1.0（中心在0附近，Loss梯度更稳定）
+   - 改动文件：src/data/dataset.py, src/inference.py
+
+3. SmoothL1Loss beta 1.0→0.1
+   - L1/L2转换点从误差=1.0改为误差=0.1，误差>10%时用L1抗极端行情outlier
+   - 改动文件：src/train_rolling.py
+
+B：兼容性改动
+
+1. 全市场随机股票采样
+   - 新建 src/data/stock_pool.py：扫描CSV发现可用股票，随机采样N只
+   - 扫描结果缓存到 pickle 文件，再次运行秒级加载
+   - dataset.py 新增 stock_ids 参数，None时回退到ChiNext50
+   - 改动文件：新建 stock_pool.py，修改 dataset.py, train_rolling.py
+
+2. 样本级滑动步长
+   - 新增 sample_stride=10，每只股票每隔10天取一个样本
+   - 减少样本间94%→0%的数据重叠，降低过拟合风险
+   - 改动文件：src/data/dataset.py, src/train_rolling.py
+
+3. 数据加载优化
+   - 8线程并行读CSV（ThreadPoolExecutor）
+   - 合并 _compute_streaming_stats + _load_data 为 _load_data_and_stats 单次遍历
+   - 避免对同一批CSV重复读取2-3遍
+   - 改动文件：src/data/dataset.py
+
+4. 缺失值线性插值
+   - NaN/Inf 改为沿tick轴线性插值，兜底填0
+   - 原来是直接跳过含NaN的股票/文件
+   - 改动文件：src/data/dataset.py
+
+5. TensorBoard子任务监控
+   - 每10步记录4个子loss（max_value, min_value, max_day, min_day）
+   - 每10步记录4个 log_var（MultiTaskLoss的自适应权重）
+   - 改动文件：src/train_rolling.py
+
+6. Windows兼容性
+   - 自动检测Windows，num_workers强制为0（避免pickle大Dataset失败）
+   - 改动文件：src/train_rolling.py
+
+7. 新增训练参数
+   - --stock_pool random/chinext50（股票采样策略）
+   - --num_stocks 500（每fold采样数）
+   - --sample_stride 10（样本滑动步长）
+   - --num_workers 4（DataLoader进程数）
+   - --smooth_l1_beta 0.1（SmoothL1转换点）
+   - --scheduler cosine（学习率调度器）
+   - --max_grad_norm 1.0（梯度裁剪）
+   - 改动文件：src/train_rolling.py

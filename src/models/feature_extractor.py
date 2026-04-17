@@ -1,7 +1,6 @@
 import math
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 class BasicBlock1D(nn.Module):
     expansion = 1

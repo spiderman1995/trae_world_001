@@ -1,7 +1,6 @@
 import os
 import glob
 import logging
-import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 import numpy as np
