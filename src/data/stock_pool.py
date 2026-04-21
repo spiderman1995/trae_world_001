@@ -189,6 +189,7 @@ class StockPool:
 
         valid = []
         excluded_reasons = {"prefix": 0, "blacklist": 0, "ipo": 0, "delisted": 0, "suspended": 0}
+        excluded_details = {"blacklist": [], "ipo": [], "delisted": [], "suspended": []}
 
         for stock_id, dates in self.availability.items():
             # 1. 前缀过滤
@@ -199,6 +200,7 @@ class StockPool:
             # 2. 黑名单（ST/*ST/手动排除）
             if stock_id in blacklist_set:
                 excluded_reasons["blacklist"] += 1
+                excluded_details["blacklist"].append(stock_id)
                 continue
 
             # 3. 上市不满 min_list_days 天（首次出现距 start_date 太近）
@@ -206,6 +208,8 @@ class StockPool:
             first_date = min(dates)
             if first_date > data_start_margin and (sd - first_date).days < min_list_days:
                 excluded_reasons["ipo"] += 1
+                days_since = (sd - first_date).days
+                excluded_details["ipo"].append(f"{stock_id}(首现{first_date.strftime('%Y-%m-%d')},距起始仅{days_since}天)")
                 continue
 
             # 4. 退市/长期停牌（最后交易日远早于数据末尾）
@@ -213,12 +217,14 @@ class StockPool:
                 last_date = max(dates)
                 if last_date < delist_threshold:
                     excluded_reasons["delisted"] += 1
+                    excluded_details["delisted"].append(f"{stock_id}(末日{last_date.strftime('%Y-%m-%d')})")
                     continue
 
             # 5. 停牌过多（区间内交易天数不足）
             days_in_range = sum(1 for d in dates if sd <= d <= ed)
             if days_in_range < min_trading_days:
                 excluded_reasons["suspended"] += 1
+                excluded_details["suspended"].append(f"{stock_id}({days_in_range}/{min_trading_days}天)")
                 continue
 
             valid.append(stock_id)
@@ -228,6 +234,12 @@ class StockPool:
             f"in [{start_date}, {end_date}] (trading days: {num_trading_days}). "
             f"Excluded: {excluded_reasons}"
         )
+        # 输出各类排除的具体股票（前缀过滤数量多但无需列明）
+        for reason in ("ipo", "delisted", "suspended", "blacklist"):
+            details = excluded_details[reason]
+            if details:
+                logger.info(f"  Excluded({reason}): {', '.join(sorted(details))}")
+
         return sorted(valid)
 
     def sample_stocks(self, n=50, start_date=None, end_date=None,

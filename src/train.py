@@ -226,10 +226,10 @@ def main():
     parser.add_argument("--batch_size", type=int, default=2) # Small batch for 4050 + Large Model
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--seq_len", type=int, default=180)
-    parser.add_argument("--pred_len", type=int, default=60)
+    parser.add_argument("--pred_len", type=int, default=15)
     parser.add_argument("--depth", type=int, default=4) # Smaller ViT for test
     parser.add_argument("--num_heads", type=int, default=4)
-    parser.add_argument("--day_sigma", type=float, default=2.0)
+    parser.add_argument("--day_sigma", type=float, default=1.0)
     parser.add_argument("--start_date", type=str, default="2024-01-01")
     parser.add_argument("--end_date", type=str, default="2024-12-31")
     

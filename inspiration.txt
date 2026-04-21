@@ -1,0 +1,39 @@
+================================================================================
+灵感备忘录 — 暂时不改，留待后续验证和实施
+================================================================================
+
+
+1. [已完成] RevIN（可逆实例归一化）替换全局z-score
+   - 已在 feature_extractor.py 实现，数据管道移除z-score
+   - 见 update.txt 2026-04-21 A.2
+
+2. 加入日级技术指标作为补充特征
+   - 来源：project12 的 preprocess.py
+   - 候选指标：MA7/MA21、MACD、布林带、EMA、动量、傅里叶分量、小波特征
+   - 实施方式：在现有18个tick特征基础上，新增日级聚合特征
+   - 参考代码：D:\101_ide_work_dir\project12_论文复现\...\utils\preprocess.py
+
+3. Transformer输出后接BiLSTM做时序建模
+   - 来源：project12 架构（RevIN-CNN-iTransformer-BiLSTM）
+   - 当前：只取CLS token [B, 1024] 做预测
+   - 改进：用所有token输出 [B, 181, 1024] 过BiLSTM，捕捉双向时序依赖
+   - 参考代码：D:\101_ide_work_dir\project12_论文复现\...\utils\model_RevINCNNiTransformerBiLSTM.py
+
+4. 两层归一化策略：全局粗归一化 + 模型内细归一化（RevIN）
+   - project12方式：MinMaxScaler全局归一化 + RevIN模型内实例归一化
+   - 好处：全局归一化让数据量级可控，RevIN处理样本间的分布差异
+
+5. PyTorch Lightning 重构
+   - 好处：代码更简洁，自动处理GPU/分布式/日志/checkpoint
+   - 约束：需要PyTorch 1.10.1兼容性，Lightning 1.x版本支持
+   - 优先级低，当前手写训练循环够用
+
+6. [已完成] CNN精简 4stage×2block → 4stage×1block + Tanh→BatchNorm
+   - 见 update.txt 2026-04-21 A.3, A.4
+
+7. 预计算CNN特征缓存
+   - 每个fold开始时对所有股票所有天过一次CNN，缓存输出
+   - 后续epoch只训练ViT，CNN冻结
+   - 预估加速10-20倍
+   - 代价：CNN不再端到端训练
+   - 适合在CNN训练稳定后使用（先端到端训几个epoch，再冻结CNN）

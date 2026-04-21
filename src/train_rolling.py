@@ -334,12 +334,20 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
         mean_train_loss = epoch_train_loss / max(epoch_train_steps, 1)
         writer.add_scalar("Train/Loss_epoch", mean_train_loss, epoch + 1)
 
-        val_loss, topk_max, topk_min = validate(
+        (val_loss, topk_max, topk_min,
+         val_loss_max_value, val_loss_min_value, val_loss_max_day, val_loss_min_day,
+         rank_ic_max, rank_ic_min) = validate(
             feature_extractor, vit_model, mtl_loss_wrapper, val_loader, device, criterion_day, criterion_value, args.topk, fold_idx
         )
         writer.add_scalar("Val/Loss_epoch", val_loss, epoch + 1)
         writer.add_scalar(f"Val/Top{args.topk}_MaxDay_epoch", topk_max, epoch + 1)
         writer.add_scalar(f"Val/Top{args.topk}_MinDay_epoch", topk_min, epoch + 1)
+        writer.add_scalar("Val/loss_max_value", val_loss_max_value, epoch + 1)
+        writer.add_scalar("Val/loss_min_value", val_loss_min_value, epoch + 1)
+        writer.add_scalar("Val/loss_max_day", val_loss_max_day, epoch + 1)
+        writer.add_scalar("Val/loss_min_day", val_loss_min_day, epoch + 1)
+        writer.add_scalar("Val/RankIC_max_value", rank_ic_max, epoch + 1)
+        writer.add_scalar("Val/RankIC_min_value", rank_ic_min, epoch + 1)
 
         # Step scheduler
         current_lr = optimizer.param_groups[0]["lr"]
@@ -353,7 +361,7 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
         logger.info(
             f"Fold {fold_idx} Epoch {epoch+1}: TrainLoss={mean_train_loss:.4f}, "
             f"ValLoss={val_loss:.4f}, Top{args.topk}Max={topk_max:.4f}, Top{args.topk}Min={topk_min:.4f}, "
-            f"LR={current_lr:.2e}"
+            f"RankIC_max={rank_ic_max:.4f}, RankIC_min={rank_ic_min:.4f}, LR={current_lr:.2e}"
         )
 
         if val_loss < best_val_loss - args.min_delta:
@@ -423,10 +431,18 @@ def validate(feature_extractor, vit_model, mtl_loss_wrapper, loader, device, cri
     feature_extractor.eval()
     vit_model.eval()
     total_loss = 0
+    total_loss_max_value = 0
+    total_loss_min_value = 0
+    total_loss_max_day = 0
+    total_loss_min_day = 0
     count = 0
     hit_max = 0
     hit_min = 0
     total_samples = 0
+    all_pred_max_value = []
+    all_true_max_value = []
+    all_pred_min_value = []
+    all_true_min_value = []
 
     with torch.no_grad():
         pbar = tqdm(loader, desc=f"Fold {fold_idx} Val", unit="batch", leave=True)
@@ -450,6 +466,10 @@ def validate(feature_extractor, vit_model, mtl_loss_wrapper, loader, device, cri
 
             losses_list = torch.stack([loss_max_value, loss_min_value, loss_max_day, loss_min_day])
             total_loss += mtl_loss_wrapper(losses_list).item()
+            total_loss_max_value += loss_max_value.item()
+            total_loss_min_value += loss_min_value.item()
+            total_loss_max_day += loss_max_day.item()
+            total_loss_min_day += loss_min_day.item()
             count += 1
 
             pred_max_day = torch.argmax(outputs['max_day'], dim=1)
@@ -458,11 +478,36 @@ def validate(feature_extractor, vit_model, mtl_loss_wrapper, loader, device, cri
             hit_min += (torch.abs(pred_min_day - target_min_day) <= topk).float().sum().item()
             total_samples += B
 
+            all_pred_max_value.append(outputs['max_value'].view(-1).cpu())
+            all_true_max_value.append(target_max_value.view(-1).cpu())
+            all_pred_min_value.append(outputs['min_value'].view(-1).cpu())
+            all_true_min_value.append(target_min_value.view(-1).cpu())
+
     avg_loss = total_loss / max(count, 1)
+    avg_loss_max_value = total_loss_max_value / max(count, 1)
+    avg_loss_min_value = total_loss_min_value / max(count, 1)
+    avg_loss_max_day = total_loss_max_day / max(count, 1)
+    avg_loss_min_day = total_loss_min_day / max(count, 1)
     total_samples = max(total_samples, 1)
     topk_max = hit_max / total_samples
     topk_min = hit_min / total_samples
-    return avg_loss, topk_max, topk_min
+
+    # Rank IC: Spearman correlation between predicted and true values
+    from scipy.stats import spearmanr
+    pred_mv = torch.cat(all_pred_max_value).numpy()
+    true_mv = torch.cat(all_true_max_value).numpy()
+    pred_minv = torch.cat(all_pred_min_value).numpy()
+    true_minv = torch.cat(all_true_min_value).numpy()
+    rank_ic_max = spearmanr(pred_mv, true_mv).correlation if len(pred_mv) > 2 else 0.0
+    rank_ic_min = spearmanr(pred_minv, true_minv).correlation if len(pred_minv) > 2 else 0.0
+    if not np.isfinite(rank_ic_max):
+        rank_ic_max = 0.0
+    if not np.isfinite(rank_ic_min):
+        rank_ic_min = 0.0
+
+    return (avg_loss, topk_max, topk_min,
+            avg_loss_max_value, avg_loss_min_value, avg_loss_max_day, avg_loss_min_day,
+            rank_ic_max, rank_ic_min)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -472,11 +517,11 @@ def main():
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--seq_len", type=int, default=180)
-    parser.add_argument("--pred_len", type=int, default=60)
+    parser.add_argument("--pred_len", type=int, default=15)
     parser.add_argument("--depth", type=int, default=4)
     parser.add_argument("--num_heads", type=int, default=4)
-    parser.add_argument("--day_sigma", type=float, default=2.0)
-    parser.add_argument("--topk", type=int, default=3)
+    parser.add_argument("--day_sigma", type=float, default=1.0)
+    parser.add_argument("--topk", type=int, default=1)
     
     # For tuning
     parser.add_argument("--train_days", type=int, default=480)
@@ -485,7 +530,7 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=5e-3)
     parser.add_argument("--drop_ratio", type=float, default=0.2)
     parser.add_argument("--attn_drop_ratio", type=float, default=0.2)
-    parser.add_argument("--patience", type=int, default=5)
+    parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--min_delta", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--scheduler", type=str, default="cosine", choices=["none", "cosine", "plateau"],

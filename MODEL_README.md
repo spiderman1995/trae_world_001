@@ -1,6 +1,6 @@
 # 1D-CNN + StockViT 股票预测框架
 
-基于 A 股 tick 级数据，使用 1D-CNN 特征提取 + Vision Transformer 时序建模，预测未来 60 个交易日内的最高/最低价及其出现时间。训练采用全市场随机采样（30/31 开头创业板股票），滚动窗口 + warm-start 策略。
+基于 A 股 tick 级数据，使用 1D-CNN 特征提取 + Vision Transformer 时序建模，预测未来 15 个交易日内的最高/最低价及其出现时间。训练采用全市场随机采样（30/31 开头创业板股票），滚动窗口 + warm-start 策略。
 
 ---
 
@@ -11,11 +11,11 @@ project3_1dcnn_vit_trae/
 ├── runs_*/                          # 训练输出目录（每次实验/每个fold）
 ├── src/
 │   ├── data/
-│   │   ├── dataset.py               # 数据读取、标签构建、标准化（单次加载+统计）
+│   │   ├── dataset.py               # 数据读取、标签构建、预归一化（单次加载）
 │   │   ├── stock_pool.py            # 股票池发现、风险过滤、随机采样
 │   │   └── chinext50.py             # 创业板50成分股列表（回退用）
 │   ├── models/
-│   │   ├── feature_extractor.py     # 1D-CNN ResNet特征提取器（空间池化）
+│   │   ├── feature_extractor.py     # 1D-CNN ResNet特征提取器（RevIN + 空间池化 + BatchNorm）
 │   │   ├── transformer.py           # StockViT时序模型 + 多任务头
 │   │   └── loss.py                  # 损失函数：MultiTaskLoss + PeakDayLoss
 │   ├── utils/
@@ -26,9 +26,13 @@ project3_1dcnn_vit_trae/
 │   ├── test_weekly.py               # 测试集每周调仓评估
 │   ├── inference.py                 # 推理脚本（Predictor类）
 │   ├── backtest.py                  # 基于真实数据的滚动回测
-│   └── visualization.py             # 回测可视化（4子图）
+│   ├── visualization.py             # 回测可视化（4子图）
+│   └── factor_ic_test.py            # 单因子IC测试（信号衰减分析）
 ├── CLAUDE.md                        # 开发约束文档
 ├── MODEL_README.md                  # 本文档
+├── update.txt                       # 版本更新记录（每次改动的详细说明）
+├── inspiration.txt                  # 灵感备忘录（待验证的改进方向）
+├── train_diary.txt                  # 训练日记（实验结果记录）
 └── requirements.txt
 ```
 
@@ -46,30 +50,31 @@ project3_1dcnn_vit_trae/
 
 ### 2.2 18 个特征（列索引与语义）
 
-| 索引 | 字段名 | 含义 | 预处理 |
+| 索引 | 字段名 | 含义 | 数据管道预处理 |
 |---|---|---|---|
-| 0 | `trade_count` | 成交笔数 | log1p + Z-score |
-| 1 | `total_trade_amt` | 成交总金额 | log1p + Z-score |
-| 2 | `avg_trade_price` | 成交均价（**标签价格基准**） | log1p + Z-score |
-| 3 | `total_buy_order_id_count` | 总买入ID数 | log1p + Z-score |
-| 4 | `total_sell_order_id_count` | 总卖出ID数 | log1p + Z-score |
-| 5 | `active_buy_amt` | 主动买成交额 | log1p + Z-score |
-| 6 | `buy_mid_order_amt_ratio` | 中单买成交金额占比 | Z-score |
-| 7 | `buy_big_order_amt_ratio` | 大单买成交金额占比 | Z-score |
-| 8 | `buy_xl_order_amt_ratio` | 特大单买成交金额占比 | Z-score |
-| 9 | `sell_mid_order_amt_ratio` | 中单卖成交金额占比 | Z-score |
-| 10 | `sell_big_order_amt_ratio` | 大单卖成交金额占比 | Z-score |
-| 11 | `sell_xl_order_amt_ratio` | 特大单卖成交金额占比 | Z-score |
-| 12 | `buy_mid_active_amt_ratio` | 中单主动买成交额占比 | Z-score |
-| 13 | `buy_big_active_amt_ratio` | 大单主动买成交额占比 | Z-score |
-| 14 | `buy_xl_active_amt_ratio` | 特大单主动买成交额占比 | Z-score |
-| 15 | `sell_mid_active_amt_ratio` | 中单主动卖成交额占比 | Z-score |
-| 16 | `sell_big_active_amt_ratio` | 大单主动卖成交额占比 | Z-score |
-| 17 | `sell_xl_active_amt_ratio` | 特大单主动卖成交额占比 | Z-score |
+| 0 | `trade_count` | 成交笔数 | log1p |
+| 1 | `total_trade_amt` | 成交总金额 | log1p |
+| 2 | `avg_trade_price` | 成交均价（**标签价格基准**） | log1p |
+| 3 | `total_buy_order_id_count` | 总买入ID数 | log1p |
+| 4 | `total_sell_order_id_count` | 总卖出ID数 | log1p |
+| 5 | `active_buy_amt` | 主动买成交额 | log1p |
+| 6 | `buy_mid_order_amt_ratio` | 中单买成交金额占比 | 无 |
+| 7 | `buy_big_order_amt_ratio` | 大单买成交金额占比 | 无 |
+| 8 | `buy_xl_order_amt_ratio` | 特大单买成交金额占比 | 无 |
+| 9 | `sell_mid_order_amt_ratio` | 中单卖成交金额占比 | 无 |
+| 10 | `sell_big_order_amt_ratio` | 大单卖成交金额占比 | 无 |
+| 11 | `sell_xl_order_amt_ratio` | 特大单卖成交金额占比 | 无 |
+| 12 | `buy_mid_active_amt_ratio` | 中单主动买成交额占比 | 无 |
+| 13 | `buy_big_active_amt_ratio` | 大单主动买成交额占比 | 无 |
+| 14 | `buy_xl_active_amt_ratio` | 特大单主动买成交额占比 | 无 |
+| 15 | `sell_mid_active_amt_ratio` | 中单主动卖成交额占比 | 无 |
+| 16 | `sell_big_active_amt_ratio` | 大单主动卖成交额占比 | 无 |
+| 17 | `sell_xl_active_amt_ratio` | 特大单主动卖成交额占比 | 无 |
 
 **特征分组**：
-- **索引 0-5（绝对值量）**：成交笔数、金额等，量级差异大 → 先 `log1p()` 再 Z-score
-- **索引 6-17（比率）**：占比指标，已是 0~1 范围 → 仅 Z-score
+- **索引 0-5（绝对值量）**：成交笔数、金额等，量级差异大 → 数据管道做 `log1p()` 压缩量级
+- **索引 6-17（比率）**：占比指标，已是 0~1 范围 → 数据管道不做处理
+- **所有18个特征**统一由模型内 **RevIN**（可逆实例归一化）做归一化，不再使用全局 Z-score
 
 ---
 
@@ -107,13 +112,18 @@ _load_data_and_stats()          # 单次遍历完成两件事：
     ├── 按 stock_ids 过滤        #   - 只加载采样到的股票
     ├── NaN/Inf 线性插值          #   - 逐列 np.interp，兜底填0
     ├── tick 裁剪 1442→1424      #   - trim_auction_zeros()
-    ├── 累加统计量（if needed）    #   - log1p后的 sum/sq_sum/count
+    ├── 累加统计量（if needed）    #   - log1p后的 sum/sq_sum/count（legacy，不用于归一化）
     └── 存入 stock_data dict     #   - {stock_id: {data: [Days,18,1424], dates: [...]}}
+    ↓
+_prenormalize()                 # 一次性对所有数据做 log1p（仅前6个特征），存入 normalized_data
     ↓
 _build_indices()                # 滑动窗口建索引，stride=sample_stride
 ```
 
-**关键设计**：数据加载和统计量计算合并为一次遍历（`_load_data_and_stats`），避免重复读取 CSV。训练集传入 `mean=None, std=None` 时自动计算；验证集复用训练集的 `mean/std`。
+**关键设计**：
+- 数据加载和统计量计算合并为一次遍历（`_load_data_and_stats`），避免重复读取 CSV
+- 预归一化（`_prenormalize`）在 `__init__` 中一次性完成 log1p，`__getitem__` 只做数组切片，不重复计算
+- `mean/std` 仍然计算并保存到 checkpoint（legacy），但不再用于归一化——归一化由模型内 RevIN 替代
 
 ### 3.3 训练样本与标签（`__getitem__`）
 
@@ -136,10 +146,10 @@ min_value = daily_min[min_day] / current_price - 1.0 # 收益率
 
 > **重要**：标签是**收益率**（return），不是价格比率（ratio）。`max_value=0.05` 表示最高价比当前价高5%。推理时还原价格：`pred_price = current_price * (1.0 + pred_return)`。
 
-**输入标准化**（仅对 input_data，标签使用原始价格计算）：
+**输入预处理**（仅对 input_data，标签使用原始价格计算）：
 
-1. 前6列做 `log1p`：`input_data[:, :6, :] = log1p(input_data[:, :6, :])`
-2. Z-score：`(x - mean[1,18,1]) / (std[1,18,1] + 1e-6)`
+1. 数据管道：前6列做 `log1p`（在 `_prenormalize()` 中一次性完成）
+2. 模型内：RevIN 对每个样本独立做实例归一化（减均值除标准差），无需全局 Z-score
 
 **样本滑动步长**：`sample_stride=10`（默认），每只股票在训练窗口内每隔10天取一个样本，减少样本间相关性。
 
@@ -166,27 +176,32 @@ torch.FloatTensor(input_data),   # [seq_len, 18, 1424]
 ```
 输入: [B × Seq, 18, 1424]
 
+RevIN(18)                                       → 每样本实例归一化（解决牛熊分布漂移）
 Conv1d(18→64, k=7, stride=2, padding=3) + BN + ReLU + MaxPool(k=3, stride=2)
-└── layer1: 2× BasicBlock1D(64→64)           →  [B, 64, 356]
-└── layer2: 2× BasicBlock1D(64→128, stride=2) →  [B, 128, 178]
-└── layer3: 2× BasicBlock1D(128→256, stride=2) → [B, 256, 89]
-└── layer4: 2× BasicBlock1D(256→512, stride=2) → [B, 512, 45]
+└── layer1: 1× BasicBlock1D(64→64)             →  [B, 64, 356]
+└── layer2: 1× BasicBlock1D(64→128, stride=2)  →  [B, 128, 178]
+└── layer3: 1× BasicBlock1D(128→256, stride=2) →  [B, 256, 89]
+└── layer4: 1× BasicBlock1D(256→512, stride=2) →  [B, 512, 45]
 AdaptiveAvgPool1d(pool_size=2)                  → [B, 512, 2]
 Flatten                                         → [B, 1024]
-Tanh()                                          → 输出范围 (-1, 1)
+BatchNorm1d(1024)                               → 归一化输出分布，梯度不饱和
 
 输出: [B × Seq, 1024]
 ```
 
+**参数量**：~3.1M（每stage 1个block的精简版）。
+
+**RevIN（可逆实例归一化）**：对每个样本独立计算 `mean/var`，做 `(x - mean) / sqrt(var + eps)`，可学习 `gamma/beta`。解决不同市场环境（牛市/熊市）的分布漂移问题，替代了数据管道中的全局 Z-score。
+
 **空间池化设计**：`pool_size = ceil(output_dim / 512)`。当 `output_dim=1024` 时，`512 × 2 = 1024`，无需fc层——每个输出维度天然对应 **不同通道 × 不同时间段** 的响应，避免全局池化后用 fc 硬扩维导致的特征冗余。
 
-当 `output_dim=10000` 时：`pool_size=20`，`512×20=10240`，经一个小 `Linear(10240, 10000)` 投射。
+**BatchNorm1d**：替代原来的 Tanh。Tanh 在饱和区梯度接近0，阻碍深层网络学习；BatchNorm 归一化分布的同时保持梯度流通，且有可学习的缩放和偏移参数。
 
 `BasicBlock1D`：标准 ResNet 残差块，`Conv1d(k=3) + BN + ReLU + Conv1d(k=3) + BN + skip`。
 
 ### 4.2 StockViT 时序建模（`transformer.py`）
 
-类定义：`StockViT(seq_len=180, pred_len=60, embed_dim=1024, depth=4, num_heads=4, ...)`
+类定义：`StockViT(seq_len=180, pred_len=15, embed_dim=1024, depth=4, num_heads=4, ...)`
 
 ```
 输入：[B, 180, 1024]  （180天的CNN特征序列）
@@ -209,8 +224,8 @@ Tanh()                                          → 输出范围 (-1, 1)
 |---|---|---|---|
 | `head_max_value` | `Linear(1024→1)` | `[B, 1]` | 最高收益率 |
 | `head_min_value` | `Linear(1024→1)` | `[B, 1]` | 最低收益率 |
-| `head_max_day` | `Linear(1024→60)` | `[B, 60]` | 最高点天分布（logits） |
-| `head_min_day` | `Linear(1024→60)` | `[B, 60]` | 最低点天分布（logits） |
+| `head_max_day` | `Linear(1024→pred_len)` | `[B, 15]` | 最高点天分布（logits） |
+| `head_min_day` | `Linear(1024→pred_len)` | `[B, 15]` | 最低点天分布（logits） |
 
 ---
 
@@ -223,13 +238,13 @@ Tanh()                                          → 输出范围 (-1, 1)
 将真实天索引构造为高斯平滑概率分布，用 KL 散度衡量：
 
 ```python
-soft = exp(-0.5 * ((idx - target_idx) / sigma)^2)   # sigma=2.0
+soft = exp(-0.5 * ((idx - target_idx) / sigma)^2)   # sigma=1.0（默认）
 soft = soft / soft.sum(dim=1)                        # 归一化为概率分布
 log_probs = log_softmax(logits, dim=1)
 loss = KLDivLoss(batchmean)(log_probs, soft)
 ```
 
-高斯平滑使得预测偏差±2天也有部分概率密度，避免硬标签带来的梯度稀疏。
+高斯平滑使得预测偏差±1天也有部分概率密度，避免硬标签带来的梯度稀疏。sigma=1.0 配合 pred_len=15 的短期预测窗口。
 
 ### 5.2 MultiTaskLoss（多任务自动加权）
 
@@ -247,8 +262,8 @@ total_loss = Σ [ exp(-log_var_i) * loss_i + 0.5 * log_var_i ]
 ```python
 loss_max_value = SmoothL1Loss(beta=0.1)(pred_max_value, target_max_value)
 loss_min_value = SmoothL1Loss(beta=0.1)(pred_min_value, target_min_value)
-loss_max_day   = PeakDayLoss(sigma=2.0)(pred_max_day_logits, target_max_day)
-loss_min_day   = PeakDayLoss(sigma=2.0)(pred_min_day_logits, target_min_day)
+loss_max_day   = PeakDayLoss(sigma=1.0)(pred_max_day_logits, target_max_day)
+loss_min_day   = PeakDayLoss(sigma=1.0)(pred_min_day_logits, target_min_day)
 total_loss = MultiTaskLoss([loss_max_value, loss_min_value, loss_max_day, loss_min_day])
 ```
 
@@ -265,8 +280,8 @@ total_loss = MultiTaskLoss([loss_max_value, loss_min_value, loss_max_day, loss_m
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `seq_len` | 180 | 输入序列天数（180天历史预测60天未来） |
-| `pred_len` | 60 | 预测窗口天数 |
+| `seq_len` | 180 | 输入序列天数（180天历史预测15天未来） |
+| `pred_len` | 15 | 预测窗口天数 |
 | `epochs` | 20 | 每fold最大epoch数（有early stopping） |
 | `batch_size` | 16 | |
 | `lr` | 1e-4 | AdamW 学习率 |
@@ -279,9 +294,9 @@ total_loss = MultiTaskLoss([loss_max_value, loss_min_value, loss_max_day, loss_m
 | `drop_ratio` | 0.2 | Transformer MLP/Embedding Dropout |
 | `attn_drop_ratio` | 0.2 | 注意力权重 Dropout |
 | `smooth_l1_beta` | 0.1 | SmoothL1 L1/L2 转换点 |
-| `day_sigma` | 2.0 | PeakDayLoss 高斯宽度 |
-| `topk` | 3 | TopK天精度容差 |
-| `patience` | 5 | Early Stopping 耐心值 |
+| `day_sigma` | 1.0 | PeakDayLoss 高斯宽度 |
+| `topk` | 1 | TopK天精度容差（±1天） |
+| `patience` | 10 | Early Stopping 耐心值 |
 | `min_delta` | 1e-3 | Early Stopping 最小改善量 |
 | `seed` | 42 | 全局随机种子 |
 | `scheduler` | cosine | LR调度器：cosine / plateau / none |
@@ -303,7 +318,7 @@ fold_2: train[day_11 .. day_490],  val[day_491 .. day_550]
 ...（每次滑动 step_days=10 天）
 ```
 
-约束：`train_days >= seq_len + pred_len`（480 >= 180+60=240），每只股票每fold最多产生 `(480-240)/10 + 1 = 25` 个样本。
+约束：`train_days >= seq_len + pred_len`（480 >= 180+15=195），每只股票每fold最多产生 `(480-195)/10 + 1 = 29` 个样本。
 
 **每fold训练流程**：
 
@@ -311,8 +326,8 @@ fold_2: train[day_11 .. day_490],  val[day_491 .. day_550]
 2. **数据加载**：训练集自动计算 `mean/std`；验证集复用训练集的
 3. **模型构建**：加载上一 fold 的 `model_final.pth`（warm-start，`strict=False`）
 4. **训练循环**：混合精度（`autocast + GradScaler`）、梯度裁剪、cosine LR
-5. **验证**：每 epoch 结束计算 val_loss + TopK 天精度
-6. **Early Stopping**：连续 5 个 epoch val_loss 不降则停止
+5. **验证**：每 epoch 结束计算 val_loss + TopK 天精度 + 4个子loss + Rank IC
+6. **Early Stopping**：连续 10 个 epoch val_loss 不降则停止
 7. **保存**：`model_best.pth`（最优epoch）→ 复制为 `model_final.pth`
 
 **验证集数据范围**（比 test_range 多取 seq_len 天上下文）：
@@ -320,16 +335,22 @@ fold_2: train[day_11 .. day_490],  val[day_491 .. day_550]
 eval_range = (max(1, test_range[0] - seq_len), test_range[1])
 ```
 
-**TensorBoard 监控**（每10步写入）：
+**TensorBoard 监控**：
+
+训练（每10步写入）：
 - `Train/Loss_step`、`Train/Loss_epoch`
 - `Train/loss_max_value`、`Train/loss_min_value`、`Train/loss_max_day`、`Train/loss_min_day`
 - `Train/log_var_max_val`、`Train/log_var_min_val`、`Train/log_var_max_day`、`Train/log_var_min_day`
-- `Val/Loss_epoch`、`Val/Top3_MaxDay_epoch`、`Val/Top3_MinDay_epoch`
 - `Train/LR`
+
+验证（每epoch写入）：
+- `Val/Loss_epoch`、`Val/Top1_MaxDay_epoch`、`Val/Top1_MinDay_epoch`
+- `Val/loss_max_value`、`Val/loss_min_value`、`Val/loss_max_day`、`Val/loss_min_day`
+- `Val/RankIC_max_value`、`Val/RankIC_min_value`
 
 **TopK 天精度**：
 ```python
-# 预测天与真实天之差绝对值 ≤ topk=3，视为命中
+# 预测天与真实天之差绝对值 ≤ topk=1，视为命中（±1天容差）
 topk_max_acc = 命中数 / 总样本数
 ```
 
@@ -339,8 +360,8 @@ topk_max_acc = 命中数 / 总样本数
   'feature_extractor': state_dict,
   'vit': state_dict,
   'optimizer': state_dict,
-  'mean': FloatTensor[18],           # 必须在推理时复用
-  'std': FloatTensor[18],
+  'mean': FloatTensor[18],           # legacy，不再用于归一化（RevIN替代）
+  'std': FloatTensor[18],            # legacy，保留向后兼容
   'config': {
       'seq_len', 'pred_len', 'embed_dim',
       'depth', 'num_heads', 'input_channels'
@@ -506,7 +527,7 @@ python src/backtest.py \
 
 2. **标签是收益率**：`max_value = price / current_price - 1.0`，中心在0附近。推理还原：`price = current_price × (1 + return)`。不要混淆为价格比率。
 
-3. **mean/std 必须一致**：训练时自动计算并保存到 checkpoint；推理/回测时必须从 checkpoint 读取复用。不同 fold 的 mean/std 不同（采样股票不同）。
+3. **归一化由 RevIN 处理**：模型内 RevIN 对每个样本独立归一化，不依赖全局 mean/std。checkpoint 中仍保存 mean/std（legacy），但推理/回测时不再使用。
 
 4. **Windows 限制**：DataLoader `num_workers` 自动降为 0（避免 pickle 大 Dataset 失败）；`prefetch_factor` 仅在 `num_workers > 0` 时传入（PyTorch 1.10.1 兼容）。
 

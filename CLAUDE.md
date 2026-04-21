@@ -5,7 +5,7 @@ Trains on randomly sampled stocks from the full market (30/31 prefix), not limit
 
 ## Architecture
 
-- **1D-CNN** (`feature_extractor.py`): ResNet-style, `[18, 1424]` tick data -> embedding. Uses spatial pooling (`AdaptiveAvgPool1d(pool_size)`) instead of global pooling to preserve time-position information. For `output_dim=1024`: `pool_size=2`, `512×2=1024`, no fc layer needed. For `output_dim=10000`: `pool_size=20`, `512×20=10240 → fc → 10000`.
+- **1D-CNN** (`feature_extractor.py`): ResNet-style 4stage×1block (~3.1M params), `[18, 1424]` tick data -> embedding. Uses RevIN (per-instance normalization) at input, spatial pooling (`AdaptiveAvgPool1d(pool_size)`) instead of global pooling, and BatchNorm1d at output. For `output_dim=1024`: `pool_size=2`, `512×2=1024`, no fc layer needed.
 - **StockViT** (`transformer.py`): CLS-token ViT (encoder-only), 4 prediction heads (max_value, min_value, max_day, min_day)
 - **embed_dim = 1024** hardcoded in both `train.py` and `train_rolling.py` (default in model class is 10000, never used)
 
@@ -21,9 +21,9 @@ Trains on randomly sampled stocks from the full market (30/31 prefix), not limit
 ## 18 Features - Critical Constraints
 
 - **Features 0-5 (absolute values)**: `trade_count, total_trade_amt, avg_trade_price, total_buy_order_id_count, total_sell_order_id_count, active_buy_amt`
-  - These get `log1p()` transform before normalization
+  - These get `log1p()` transform in data pipeline
 - **Features 6-17 (ratios)**: various order amount ratios and active amount ratios
-  - These are NOT log-transformed, only Z-score normalized
+  - No data-level transform; RevIN in model handles normalization for all 18 features
 - **Feature index 2** (`avg_trade_price`) is the price basis for ALL labels and backtest pricing
 
 ## Price Reference
@@ -52,11 +52,10 @@ max_value = daily_max[max_day] / current_price - 1.0
 
 ## Normalization
 
-1. First 6 features: `log1p(x)` first
-2. Then Z-score: `(x - mean) / (std + 1e-6)`
-3. `mean/std` computed per-fold from the sampled stocks' training data (single-pass with data loading)
-4. `mean/std` are saved in checkpoint and must be reused at inference/test/backtest
-5. Missing values (NaN/Inf): linear interpolation along tick axis, fallback to 0
+1. Data pipeline: first 6 features get `log1p(x)`, no z-score (RevIN in model handles normalization)
+2. Model: RevIN (Reversible Instance Normalization) at CNN input — per-sample mean/var normalization, handles bull/bear distribution drift
+3. `mean/std` still computed and saved in checkpoint (legacy, not used for normalization)
+4. Missing values (NaN/Inf): linear interpolation along tick axis, fallback to 0
 
 ## Loss Functions (`loss.py`)
 
@@ -69,7 +68,7 @@ max_value = daily_max[max_day] / current_price - 1.0
 ## Training
 
 - Primary script: `train_rolling.py` (rolling window with warm-start across folds)
-- Default: `seq_len=180, pred_len=60, train_days=480, test_days=60, step_days=10`
+- Default: `seq_len=180, pred_len=15, train_days=480, test_days=60, step_days=10`
 - Stock sampling: per-fold, randomly sample `--num_stocks 50` from available pool (seed = base_seed + fold_idx)
 - DataLoader: `num_workers=4, persistent_workers=True, prefetch_factor=2` for GPU overlap
 - Mixed precision: `torch.cuda.amp.autocast()` + `GradScaler()` (old-style API for PyTorch 1.10.1 compatibility)

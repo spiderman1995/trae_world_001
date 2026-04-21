@@ -67,7 +67,10 @@ class StockDataset(Dataset):
             self.mean = computed_mean
             self.std = computed_std
 
-        # 3. Build index map (stock, start_index)
+        # 3. 预归一化：一次性完成 log1p + z-score，避免 __getitem__ 重复计算
+        self._prenormalize()
+
+        # 4. Build index map (stock, start_index)
         self.indices = self._build_indices()
 
     def _get_filtered_files(self):
@@ -226,6 +229,19 @@ class StockDataset(Dataset):
 
         return final_stock_data, computed_mean, computed_std
         
+    def _prenormalize(self):
+        """一次性对所有数据做 log1p（仅前6个特征）。z-score 已移除，由模型内 RevIN 替代。"""
+        logger = logging.getLogger(__name__)
+
+        self.normalized_data = {}
+        for stock_id, content in self.stock_data.items():
+            raw = content['data']  # [num_days, 18, 1424]
+            normed = raw.copy()
+            normed[:, :6, :] = np.log1p(normed[:, :6, :])
+            self.normalized_data[stock_id] = normed.astype(np.float32)
+
+        logger.info(f"Pre-normalized {len(self.normalized_data)} stocks in memory.")
+
     def _build_indices(self):
         indices = []
         for stock_id, data_dict in self.stock_data.items():
@@ -245,64 +261,34 @@ class StockDataset(Dataset):
     def __getitem__(self, idx):
         stock_id, start_idx = self.indices[idx]
         data_dict = self.stock_data[stock_id]
-        
-        # Input Sequence
-        # Shape: [Seq, C, L]
-        input_seq = data_dict['data'][start_idx : start_idx + self.seq_len]
-        
-        # Target Window
+        raw_data = data_dict['data']  # [num_days, 18, 1424] 原始数据
+
+        # 标签计算（用原始价格）
         target_start = start_idx + self.seq_len
         target_end = target_start + self.pred_len
-        target_seq = data_dict['data'][target_start : target_end]
-        
-        # Calculate Targets
-        # 1. High/Low Ratio relative to CURRENT price (Last price of input sequence)
-        # Current Price is usually the Close price of the last day of input.
-        # We need raw price to calculate ratios.
-        # But we only have features. Assuming one feature is Price or we can infer return?
-        # If we don't have raw price, we can predict return.
-        # Let's assume the features are normalized, so we can't get absolute price easily.
-        # However, the task usually implies predicting return.
-        # "High/Low" might mean Max(High)/Current - 1.
-        
-        # Let's assume input data is RAW for now (from code analysis above, it seems raw).
-        # Feature 2 is avg_trade_price.
-        # "300562, 09:29:50, ..."
-        # Usually Tick Data: trade_count, total_trade_amt, avg_trade_price, ...
-        # We use Feature 2 for price-related calculations.
-        
-        # Get Current Price (Last tick of last input day)
-        # input_seq: [Seq, C, L] -> [seq_len, 18, 1424]
-        # Last day: input_seq[-1] -> [18, 1424]
-        # Last tick: input_seq[-1, 2, -1] (Using avg_trade_price)
-        
-        # 基准价：最后一个 tick（集合竞价结果 15:00:00）
-        current_price = input_seq[-1, 2, -1] + 1e-6
+        target_seq = raw_data[target_start : target_end]
 
-        # 数据已在预处理阶段去除集合竞价零行，可直接取 max/min
+        current_price = raw_data[start_idx + self.seq_len - 1, 2, -1] + 1e-6
+
         daily_max = target_seq[:, 2, :].max(axis=1)
         daily_min = target_seq[:, 2, :].min(axis=1)
 
         max_day = int(np.argmax(daily_max))
         min_day = int(np.argmin(daily_min))
 
-        max_value = daily_max[max_day] / current_price - 1.0  # 收益率，中心在0附近
+        max_value = daily_max[max_day] / current_price - 1.0
         min_value = daily_min[min_day] / current_price - 1.0
-        
-        # Standardize input_seq for model input
-        input_data = input_seq.copy()
-        
-        # 1. Apply log1p to first 6 columns
-        input_data[:, :6, :] = np.log1p(input_data[:, :6, :])
-        
-        # 2. Apply Z-Score using global stats
-        if self.mean is not None and self.std is not None:
-            # Reshape stats for broadcasting: [1, 18, 1]
-            mean = self.mean.view(1, 18, 1).numpy()
-            std = self.std.view(1, 18, 1).numpy()
-            input_data = (input_data - mean) / (std + 1e-6)
-        
-        return torch.FloatTensor(input_data), {
+
+        # 模型输入（预归一化数据，直接切片，无需重复计算）
+        # z-score 已移除，由模型内 RevIN 替代
+        if self.normalized_data is not None:
+            input_data = self.normalized_data[stock_id][start_idx : start_idx + self.seq_len]
+        else:
+            input_seq = raw_data[start_idx : start_idx + self.seq_len]
+            input_data = input_seq.copy()
+            input_data[:, :6, :] = np.log1p(input_data[:, :6, :])
+
+        return torch.from_numpy(np.ascontiguousarray(input_data)), {
             'max_value': torch.tensor(max_value, dtype=torch.float),
             'min_value': torch.tensor(min_value, dtype=torch.float),
             'max_day': torch.tensor(max_day, dtype=torch.long),

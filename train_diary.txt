@@ -1,0 +1,160 @@
+================================================================================
+训练日记 — 记录每次训练的脚本、参数、改动点和结果
+================================================================================
+
+
+================================================================================
+#5  2026-04-21  runs_rolling_v7（待训练，服��器203）
+================================================================================
+
+训练脚本：
+python -m src.train_rolling --data_dir E:/pre_process/version1 --train_days 480 --test_days 60 --step_days 10 --num_stocks 500 --sample_stride 10 --epochs 20 --batch_size 32 --output_dir runs_rolling_v7
+
+参数特点（默认值已内置，无需命令行指定）：
+- seq_len=180, pred_len=15（180天历史预测15天未来，从60天缩短）
+- train_days=480, test_days=60, step_days=10
+- num_stocks=500（全市场30/31随机采样500只）
+- sample_stride=10, batch_size=32
+- weight_decay=5e-3, drop_ratio=0.2, attn_drop_ratio=0.2
+- smooth_l1_beta=0.1, day_sigma=1.0, topk=1（±1天容差）
+- patience=10（从5加大，给模型更多学习机会）
+- scheduler=cosine, max_grad_norm=1.0
+
+相比 v6 的改动（全部不兼容，需重新训练）：
+1. pred_len 60→15：缩短预测窗口，tick特征对短期预测力更强
+2. RevIN 替换全局 z-score：模型内实例归一化，解决牛熊分布漂移
+3. CNN Tanh→BatchNorm1d：避免梯度饱和，输出分布可学习
+4. CNN 4stage×2block→1block：参数~6.3M→~3.1M，减少过拟合
+5. topk 3→1, day_sigma 2.0→1.0：配合15天短窗口
+6. patience 5→10：给模型更多探索空间
+7. 验证集新增4个子loss + RankIC监控
+
+预期变化：
+- 每只股票每fold样本数：(480-195)/10+1=29（v6是25）
+- 每fold总样本：29×500=14,500
+- 每epoch batch数：14500/32≈453
+- 随机基准 TopK_MaxDay：1/15×(2×1+1)/15≈20%（v6是11.7%）
+- CNN参数减半→每batch前向传播更快
+- 重点观察：val_loss是否比v6有下降趋势，RankIC是否>0.03
+
+训练结果：
+（待填写）
+
+
+================================================================================
+#4  2026-04-21  runs_rolling_v6（已完成，10 folds，服务器203）
+================================================================================
+
+训练脚本：
+python -m src.train_rolling --data_dir E:/pre_process/version1 --train_days 480 --test_days 60 --step_days 10 --num_stocks 500 --sample_stride 10 --epochs 20 --batch_size 32 --output_dir runs_rolling_v6
+
+参数特点：
+- seq_len=180, pred_len=60（180天历史预测60天未来）
+- train_days=480, test_days=60, step_days=10
+- num_stocks=500（全市场30/31随机采样500只）
+- sample_stride=10, batch_size=32
+- weight_decay=5e-3, drop_ratio=0.2, attn_drop_ratio=0.2
+- smooth_l1_beta=0.1, scheduler=cosine
+- 每epoch约40min+，6.77s/batch，388 batches/epoch
+
+训练结果（截至 fold 10，2026-04-21）：
+
+  Fold 1（红色，2020-01~2021-12训练，2022-01~03验证，牛市→转熊）：
+  - Train Loss: 3.2 → 1.4（稳定下降，20 epochs完成）
+  - Val Loss: 3.4 → 1.4（有显著下降）
+  - Top3_MaxDay: 最高~28%，最终稳定~15%
+  - Top3_MinDay: ~99.0%（虚高，最低价出现在固定天数）
+  - LR: 1e-4 → ~1e-5（cosine衰减）
+
+  Fold 9（蓝色，2020-05~2022-04训练，2022-06~08验证，含熊市）：
+  - Train Loss: 3.0 → 0.9（持续下降，训练集拟合更好）
+  - Val Loss: 3.4 → 横盘在3.0附近，几乎不降，后期回升
+  - Top3_MaxDay: ~8-12%，比随机（11.7%）略差
+  - Top3_MinDay: ~98.2-99.4%（同样虚高）
+  - LR: 同cosine衰减
+
+  关键发现：
+  - Fold 6 之后 val_loss 明显压不住（验证集进入2022年4月后的深度下跌期）
+  - 牛市训练 → 熊市验证 = 模式失效（数据极度不平稳）
+  - Train loss持续下降但Val loss不降 = 严重过拟合
+  - Top3_MaxDay比随机还差 = 模型学到了错误模式
+  - Top3_MinDay ~99%是假象（数据统计偏差，最低价总在固定天数）
+  - log_var_max_day持续上升（~0.35）= MultiTaskLoss在降低max_day权重（学不好）
+  - log_var_min_val持续下降（~-0.4）= min_value学得相对好，权重加大
+
+  结论：
+  - 180天tick数据预测60天价格极值，信号太弱/不存在
+  - 需要缩短pred_len到15天，并做信号衰减IC测试验证方向
+  - 6.77s/batch太慢，瓶颈在CNN的5760次forward（32×180天）
+
+
+================================================================================
+#3  2026-04-17  runs_rolling_v5（未训练，参数准备）
+================================================================================
+
+训练脚本：
+python -m src.train_rolling --data_dir E:/pre_process/version1 --train_days 480 --test_days 60 --step_days 10 --num_stocks 500 --sample_stride 10 --epochs 20 --batch_size 32 --output_dir runs_rolling_v5
+
+参数特点：
+- seq_len=180, pred_len=60（180天历史预测60天未来）
+- train_days=480, test_days=60, step_days=10
+- num_stocks=500（全市场30/31随机采样500只）
+- sample_stride=10, batch_size=32
+- weight_decay=5e-3, drop_ratio=0.2, attn_drop_ratio=0.2
+- smooth_l1_beta=0.1, scheduler=cosine
+
+相比上次训练的改动：
+1. FeatureExtractor 改为空间池化（pool_size=2），去掉fc层，特征更多样
+2. 股票池增加风险过滤（IPO<180天、退市、停牌）
+3. 修复 IPO 过滤误杀 bug（数据起始期的股票不再被误判为次新股）
+4. weight_decay 1e-4→5e-3，drop_ratio 0.1→0.2，attn_drop_ratio 0.1→0.2
+5. num_stocks 50→500
+6. 标签从价格比率改为收益率（-1.0）
+
+
+================================================================================
+#2  202
+- seq_len=180, pred_len=60
+- train_days=300, test_days=60
+- num_stocks=50（随机采样50只）
+- weight_decay=1e-4, drop_ratio=0.1, attn_drop_ratio=0.1
+- smooth_l1_beta=0.1, scheduler=cosine
+- FeatureExtractor: AdaptiveAvgPool1d(1) + fc(512→1024)
+
+训练结果：
+- 训练loss稳定下降（每fold从~5-6降到~1-2）
+- 验证loss几乎不降，波动大（2-5之间横盘，有1个fold飙到~27）
+- Top3_MaxDay: 9%-17%（仅略好于随机5%）
+- Top3_MinDay: 97%-99%（异常高，最低价总出现在固定几天）
+- 结论：严重过拟合。样本太少（50只×7样本=350），模型太大（~2000万参数）
+
+问题分析：
+- 参数/样本比 = 5700:1，严重过参数化
+- weight_decay=1e-4 正则化不足
+- dropout=0.1 太低
+- 50只股票样本多样性不够
+
+6-04-13  runs_rolling_2020_2021（服务器，10 folds）
+================================================================================
+
+训练脚本：
+python -m src.train_rolling --data_dir E:/pre_process/version1 --train_days 300 --test_days 60 --step_days 10 --num_stocks 50 --sample_stride 10 --epochs 20 --batch_size 32 --output_dir runs_rolling_2020_2021
+
+参数特点：
+================================================================================
+#1  2026-04-10  runs_rolling_v1~v3（本地调试）
+================================================================================
+
+训练脚本：
+python -m src.train_rolling --data_dir D:/temp/0_tempdata8 --seq_len 60 --pred_len 60 --train_days 180 --test_days 60 --epochs 20 --batch_size 8 --output_dir runs_rolling_v1
+
+参数特点：
+- seq_len=60, pred_len=60（60天历史预测60天）
+- train_days=180（仅180天训练窗口）
+- 固定使用 ChiNext50（无随机采样）
+- 本地数据（2024年，D:/temp/0_tempdata8）
+- batch_size=8（本地显存限制）
+
+训练结果：
+- 基本验证了数据管道和模型可以跑通
+- 本地数据量小，仅用于调试

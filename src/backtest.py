@@ -121,14 +121,10 @@ def load_stock_data(data_dir, load_dates, valid_stocks):
 # 辅助函数
 # ---------------------------------------------------------------------------
 
-def normalize(arr, mean, std):
-    """arr: [seq_len, 18, 1424]"""
+def normalize(arr, mean=None, std=None):
+    """arr: [seq_len, 18, 1424] — 仅 log1p，z-score 由模型内 RevIN 替代。"""
     arr = arr.copy()
     arr[:, :6, :] = np.log1p(arr[:, :6, :])
-    if mean is not None and std is not None:
-        m = mean.numpy().reshape(1, 18, 1)
-        s = std.numpy().reshape(1, 18, 1)
-        arr = (arr - m) / (s + 1e-6)
     return arr
 
 
