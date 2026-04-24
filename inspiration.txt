@@ -3,37 +3,123 @@
 ================================================================================
 
 
-1. [已完成] RevIN（可逆实例归一化）替换全局z-score
-   - 已在 feature_extractor.py 实现，数据管道移除z-score
-   - 见 update.txt 2026-04-21 A.2
-
-2. 加入日级技术指标作为补充特征
+1. 加入日级技术指标作为补充特征
    - 来源：project12 的 preprocess.py
    - 候选指标：MA7/MA21、MACD、布林带、EMA、动量、傅里叶分量、小波特征
    - 实施方式：在现有18个tick特征基础上，新增日级聚合特征
    - 参考代码：D:\101_ide_work_dir\project12_论文复现\...\utils\preprocess.py
 
-3. Transformer输出后接BiLSTM做时序建模
+2. Transformer输出后接BiLSTM做时序建模
    - 来源：project12 架构（RevIN-CNN-iTransformer-BiLSTM）
    - 当前：只取CLS token [B, 1024] 做预测
    - 改进：用所有token输出 [B, 181, 1024] 过BiLSTM，捕捉双向时序依赖
    - 参考代码：D:\101_ide_work_dir\project12_论文复现\...\utils\model_RevINCNNiTransformerBiLSTM.py
 
-4. 两层归一化策略：全局粗归一化 + 模型内细归一化（RevIN）
+3. 两层归一化策略：全局粗归一化 + 模型内细归一化（RevIN）
    - project12方式：MinMaxScaler全局归一化 + RevIN模型内实例归一化
    - 好处：全局归一化让数据量级可控，RevIN处理样本间的分布差异
 
-5. PyTorch Lightning 重构
+4. PyTorch Lightning 重构
    - 好处：代码更简洁，自动处理GPU/分布式/日志/checkpoint
    - 约束：需要PyTorch 1.10.1兼容性，Lightning 1.x版本支持
    - 优先级低，当前手写训练循环够用
 
-6. [已完成] CNN精简 4stage×2block → 4stage×1block + Tanh→BatchNorm
-   - 见 update.txt 2026-04-21 A.3, A.4
-
-7. 预计算CNN特征缓存
+5. 预计算CNN特征缓存
    - 每个fold开始时对所有股票所有天过一次CNN，缓存输出
    - 后续epoch只训练ViT，CNN冻结
    - 预估加速10-20倍
    - 代价：CNN不再端到端训练
    - 适合在CNN训练稳定后使用（先端到端训几个epoch，再冻结CNN）
+
+6. IC信号衰减曲线的关键发现（2026-04-21 factor_ic_test, 200只股票, 2020-2022）
+   - 清晰的"均值回归→动量→反转"模式：
+     1天(强负IC -0.05) → 5天(正IC +0.03) → 10天(峰值 +0.05) → 15天(+0.03) → 30天(归零) → 60天(强负 -0.05)
+   - 1天负IC = 短期均值回归（今天涨明天大概率回落）
+   - 5-15天正IC = 中期动量（强势延续）
+   - 10天是动量信号峰值，pred_len=10 可能优于 pred_len=15
+   - 60天负IC = 长期反转（涨多了要跌回来），解释了v6 pred_len=60效果差的原因
+
+7. 特征信号强弱排序（IC测试验证）
+   - 最强：大单/特大单相关（ratio_8特大单买占比 IC=0.042, ratio_14, ratio_7）
+   - 中等：订单活跃度（total_buy_order_id_count, trade_count）
+   - 最弱：中单相关（ratio_6中单买占比, ratio_9中单卖占比）
+   - 结论：大单=聪明钱假说被数据验证，散户指标预测力差
+   - 所有ICIR < 0.5（最高0.34），信号存在但不稳定，牛熊切换时IC会反转
+
+8. IC测试的局限性（解读时注意）
+   - 日均值压平了日内tick模式，IC是信号下界，CNN能提取更多
+   - 只测线性排序相关，非线性组合（如"ratio_8高且ratio_9低"）捕捉不到
+   - 收盘价max ≠ tick级max，模型用日内最高价，波动更大信号更丰富
+   - 截面IC受股票数影响，<30只时单日IC噪声大
+
+9. 训练过拟合对策（v7前2个fold观察）
+   - Val loss U型曲线：最佳epoch在5-8，patience=10太大
+   - RankIC前几epoch ~0.05（有效），后半段衰减到0甚至负
+   - 已改：patience 10→5，把模型卡在"刚学到信号、还没过拟合"的区间
+
+10. day头从精确天数改为粗分段（降低学习难度）
+    - 问题：max_day预测精确哪一天（15分类）太难，val_loss_max_day爆炸性上升
+    - 方案：15天分成3段，前5天=0/中5天=1/后5天=2，变成3分类
+    - 好处：泛化难度大幅降低，"大概在中段到顶"对回测选股够用
+    - 代价：失去精确天数信息，但当前精确预测本来就不准
+
+12. 新服务器迁移：Flash Attention + PyTorch 2.0+
+    - vision_transformer_v2/vit_model.py 第116-120行有现成的 F.scaled_dot_product_attention 实现
+    - 迁移到 src/models/transformer.py 的 Attention 类，替换手写 q @ k.transpose()
+    - AMP API 升级：torch.cuda.amp.autocast → torch.amp.autocast('cuda')
+    - AMP API 升级：torch.cuda.amp.GradScaler → torch.amp.GradScaler('cuda')
+    - 当前 torch1.10.1 分支的代码需要搬一份到 main 分支
+
+13. channels_last 内存格式（需 PyTorch 2.0+）
+    - 现代 GPU 的 Conv 在 channels_last 下比 channels_first 快 5-10%
+    - 1D Conv 的 channels_last 在 PyTorch 1.10 支持不完善，易踩坑
+    - 迁移到 PyTorch 2.0+ 后可以尝试：model.to(memory_format=torch.channels_last)
+    - 同时 input 也要 .contiguous(memory_format=torch.channels_last)
+
+14. embed_dim 降维试验（暂不做，记录）
+    - 当前 embed_dim=1024，ViT MLP hidden = 4×1024 = 4096（Transformer 大部分计算在这里）
+    - 降到 512 可节省 ~60% Transformer 计算，训练速度 1.5-2x
+    - 需重新炼丹验证精度，属超参搜索而非纯优化
+    - 先把基线稳住再做
+
+11. day头单独加强正则化（抑制过拟合）[v8 已实施]
+    - 问题：max_day在训练集上能"背答案"但不泛化，log_var下降后加权反而拖累总loss
+    - 方案：在ViT的day预测头前面单独加Dropout(0.5)，比value头更重的dropout
+    - 可配合冻结day头log_var在固定低权重（如1.0），防止"自信地犯错"
+    - 好处：不改架构不改loss，只调正则强度
+    - 配套：--day_sigma 1.0 → 2.0（PeakDayLoss 目标分布放宽一半）
+
+15. Warm-start 跨 fold 的累积污染假说（v8 验证中）
+    - 观察：v7 训练 11 个 fold 后，后期 val loss + RankIC 全面退化
+    - 假说：Warm-start 每 fold 都 load 上一 fold 的完整权重（CNN + ViT + heads）
+      11 个 fold 叠加后，权重里堆积了各时代的 artifact（节假日/结算日/季节节奏），跨期失效
+    - Day 头尤其受害：日期信号弱，模型只能抓时代性特征，不可复用
+    - 验证路径：如果 #11（day 头 Dropout）生效、v8 后期 fold 不再发散，
+      说明污染可通过 day 头正则化压住，warm-start 本身无需改
+    - 若 v8 仍后期退化，考虑 #16
+
+16. Warm-start 只加载 CNN，ViT + heads 每 fold 重新初始化（备选方案）
+    - 动机：CNN 学"tick → 日级表征"是通用技能，跨期复用合理
+      ViT + heads 学"表征 → 未来标签"的映射，时代特化严重，不该累积
+    - 改动：train_rolling.py 加载 checkpoint 时只 load feature_extractor，
+      跳过 vit_model.load_state_dict
+    - 代价：每 fold ViT 从随机初始化开始，收敛更慢，总训练时间 +20~30%
+    - 好处：消除 ViT 层的时代偏置累积
+    - 前提：#11 在 v8 被验证仍不够时再做
+
+17. 断点续训（fold 级自动跳过）
+    - 动机：v8 规模 ~19 小时（77 fold × ~15min），长训中途崩溃损失大
+      当前优雅停止 + fold 间 checkpoint 已覆盖 80% 场景，但 fold 内崩溃无恢复
+    - 最简方案（约 15 行代码）：重跑同一条命令时，自动识别已有 model_final.pth
+      的 fold 并跳过，从下一个未完成 fold 开始。不需要新参数。
+    - 实现要点：
+      * 循环里 if os.path.exists(fold_dir/model_final.pth): skip + load as previous_model_path
+      * 从 checkpoint 里读 best_val_loss / best_epoch 恢复 summary 表
+      * Config 一致性检查：checkpoint 里的 args 与当前 args 不一致时报警
+      * torch.load try/except：文件损坏时重训该 fold
+    - 覆盖场景：人为 Ctrl+C 继续、机器重启、fold 内 OOM/崩溃、跨设备迁移
+    - 不覆盖（复杂版才需要，暂不做）：fold 内 epoch 级续训、TB 日志合并
+    - 判断时机：
+      * v8 先不加（v7 证明单 fold 稳定，跑一次 19h 能接受）
+      * 若 v8 或 v9 真的崩过浪费了几小时 → 立即加最简版
+      * 若后续需要持续迭代（每天都跑）→ 提前加

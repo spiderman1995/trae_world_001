@@ -11,7 +11,7 @@ project3_1dcnn_vit_trae/
 ├── runs_*/                          # 训练输出目录（每次实验/每个fold）
 ├── src/
 │   ├── data/
-│   │   ├── dataset.py               # 数据读取、标签构建、预归一化（单次加载）
+│   │   ├── dataset.py               # 数据读取、标签构建、预归一化（含 GlobalDataCache 跨fold预加载）
 │   │   ├── stock_pool.py            # 股票池发现、风险过滤、随机采样
 │   │   └── chinext50.py             # 创业板50成分股列表（回退用）
 │   ├── models/
@@ -100,30 +100,45 @@ project3_1dcnn_vit_trae/
 
 **采样**：`sample_stocks(n=500, seed=base_seed+fold_idx)` 从过滤后的池中随机采样。
 
-### 3.2 数据加载与统计量计算（`dataset.py`）
+> **防未来信息泄漏**：每个 fold 的采样 `end_date` 只用到 `train_period[1]`（训练期末），不用 `test_period[1]`。这样测试期的退市/停牌不会参与训练时的股票筛选 — 模拟真实部署时只能看到截止当前的历史数据。
 
-`StockDataset.__init__` 流程：
+### 3.2 数据加载（`dataset.py`）
+
+**两种加载路径**：
+
+#### 快速路径：跨 fold 预加载（`GlobalDataCache`，主路径）
+
+在 `main()` 启动时，一次性读取所有 fold 需要股票的全部日期数据：
 
 ```
-_get_filtered_files()           # 按日期范围筛选 CSV 文件
+main() 启动
     ↓
-_load_data_and_stats()          # 单次遍历完成两件事：
-    ├── 8线程并行读 CSV          #   - ThreadPoolExecutor(max_workers=8)
-    ├── 按 stock_ids 过滤        #   - 只加载采样到的股票
-    ├── NaN/Inf 线性插值          #   - 逐列 np.interp，兜底填0
-    ├── tick 裁剪 1442→1424      #   - trim_auction_zeros()
-    ├── 累加统计量（if needed）    #   - log1p后的 sum/sq_sum/count（legacy，不用于归一化）
-    └── 存入 stock_data dict     #   - {stock_id: {data: [Days,18,1424], dates: [...]}}
+预计算所有 fold 的股票采样 → all_needed_stocks（并集）
     ↓
-_prenormalize()                 # 一次性对所有数据做 log1p（仅前6个特征），存入 normalized_data
+内存预估：若 < 128 GB 则创建 GlobalDataCache（否则退回慢速路径）
     ↓
-_build_indices()                # 滑动窗口建索引，stride=sample_stride
+GlobalDataCache._load()
+    ├── 8线程并行读 CSV（pyarrow 引擎如可用，2-3x 更快）
+    ├── NaN/Inf 插值填充（仅 read 阶段一次）
+    ├── tick 裁剪 1442→1424
+    └── 同时存储 raw（float32）和 normalized（log1p 应用于前6特征）
+    ↓
+每个 fold 的 StockDataset(global_cache=...) 从缓存切片（numpy view，零拷贝）
+```
+
+#### 慢速路径：逐 fold 读 CSV（回退，`--preload off` 或内存超限时）
+
+```
+StockDataset.__init__
+    ├── _get_filtered_files()   # 按日期范围筛选 CSV
+    ├── _load_data()             # 调用共享 helper _read_csvs_to_per_stock_arrays
+    └── _prenormalize()          # log1p 前6特征
 ```
 
 **关键设计**：
-- 数据加载和统计量计算合并为一次遍历（`_load_data_and_stats`），避免重复读取 CSV
-- 预归一化（`_prenormalize`）在 `__init__` 中一次性完成 log1p，`__getitem__` 只做数组切片，不重复计算
-- `mean/std` 仍然计算并保存到 checkpoint（legacy），但不再用于归一化——归一化由模型内 RevIN 替代
+- `_read_csvs_to_per_stock_arrays` 为模块级共享 helper，`StockDataset` 和 `GlobalDataCache` 都调用它（避免代码重复）
+- `__init__` 一次性完成 log1p，`__getitem__` 只做数组切片
+- `mean/std` **不再计算**，直接置为 `zeros(18)/ones(18)` 占位（仅为 checkpoint 兼容保留字段，归一化完全由模型内 RevIN 处理）
 
 ### 3.3 训练样本与标签（`__getitem__`）
 
@@ -296,7 +311,7 @@ total_loss = MultiTaskLoss([loss_max_value, loss_min_value, loss_max_day, loss_m
 | `smooth_l1_beta` | 0.1 | SmoothL1 L1/L2 转换点 |
 | `day_sigma` | 1.0 | PeakDayLoss 高斯宽度 |
 | `topk` | 1 | TopK天精度容差（±1天） |
-| `patience` | 10 | Early Stopping 耐心值 |
+| `patience` | 5 | Early Stopping 耐心值（v7 起从 10 降为 5） |
 | `min_delta` | 1e-3 | Early Stopping 最小改善量 |
 | `seed` | 42 | 全局随机种子 |
 | `scheduler` | cosine | LR调度器：cosine / plateau / none |
@@ -309,6 +324,8 @@ total_loss = MultiTaskLoss([loss_max_value, loss_min_value, loss_max_day, loss_m
 | `resume_from` | None | 第一fold初始权重路径 |
 | `start_date` | None | 数据起始日期过滤 |
 | `end_date` | None | 数据截止日期过滤 |
+| `preload` | auto | 跨fold数据预加载：auto/on/off（auto阈值128GB） |
+| `cudnn_benchmark` | False | 开启后 Conv 自动选最快算法（5-15% 提速，牺牲严格可复现） |
 
 **fold 划分逻辑**：
 
@@ -322,13 +339,17 @@ fold_2: train[day_11 .. day_490],  val[day_491 .. day_550]
 
 **每fold训练流程**：
 
-1. **股票采样**：从 StockPool 过滤后随机采样 500 只（seed = base_seed + fold_idx）
-2. **数据加载**：训练集自动计算 `mean/std`；验证集复用训练集的
+1. **股票采样**：从 StockPool 过滤后随机采样 500 只，`end_date=train_period[1]` 避免未来信息泄漏（seed = base_seed + fold_idx）
+2. **数据加载**：从 `GlobalDataCache` 切片（零拷贝视图），`mean/std` 为占位 zeros/ones
 3. **模型构建**：加载上一 fold 的 `model_final.pth`（warm-start，`strict=False`）
-4. **训练循环**：混合精度（`autocast + GradScaler`）、梯度裁剪、cosine LR
+4. **训练循环**：混合精度（`autocast + GradScaler`）、梯度裁剪、cosine LR、`non_blocking=True` GPU 传输
 5. **验证**：每 epoch 结束计算 val_loss + TopK 天精度 + 4个子loss + Rank IC
-6. **Early Stopping**：连续 10 个 epoch val_loss 不降则停止
+6. **Early Stopping**：连续 5 个 epoch val_loss 不降则停止
 7. **保存**：`model_best.pth`（最优epoch）→ 复制为 `model_final.pth`
+
+**优雅停止**：
+
+运行中按一次 `Ctrl+C`，训练会跑完当前 epoch 并保存 best model 后退出，tqdm 进度条显示 `STATUS=STOPPING`。按两次强制退出。fold 间的 `_stop_requested` 标志保证已完成 fold 的模型不会丢失。
 
 **验证集数据范围**（比 test_range 多取 seq_len 天上下文）：
 ```python
@@ -527,10 +548,17 @@ python src/backtest.py \
 
 2. **标签是收益率**：`max_value = price / current_price - 1.0`，中心在0附近。推理还原：`price = current_price × (1 + return)`。不要混淆为价格比率。
 
-3. **归一化由 RevIN 处理**：模型内 RevIN 对每个样本独立归一化，不依赖全局 mean/std。checkpoint 中仍保存 mean/std（legacy），但推理/回测时不再使用。
+3. **归一化由 RevIN 处理**：模型内 RevIN 对每个样本独立归一化，不依赖全局 mean/std。checkpoint 中仍保存 mean/std 字段（现在是 `zeros(18)/ones(18)` 占位，不再计算），推理/回测时也不再使用。
 
 4. **Windows 限制**：DataLoader `num_workers` 自动降为 0（避免 pickle 大 Dataset 失败）；`prefetch_factor` 仅在 `num_workers > 0` 时传入（PyTorch 1.10.1 兼容）。
 
 5. **embed_dim 协同**：`feature_extractor.output_dim` 和 `StockViT.embed_dim` 必须一致，均在 `train_rolling.py` 中 hardcode 为 1024。
 
 6. **尾盘零行**：原始 1442 tick 中 index 1423~1440 是集合竞价零行，加载时自动裁剪为 1424 tick。index 1441（15:00:00）保留。
+
+7. **无未来信息泄漏**：
+   - 股票采样 `end_date=train_period[1]`（不看测试期的退市/停牌）
+   - `current_price` 用输入窗口末尾 tick（预测时刻，非未来）
+   - RevIN 只用当前样本自身的均值/方差（per-sample，无跨样本信息流）
+   - 标签 `max/min_value/day` 从 `target_seq` 计算是预测目标，不算泄漏
+   - Val 输入跨 train/test 边界是 walk-forward 标准做法（输入 = 预测时刻之前的历史）

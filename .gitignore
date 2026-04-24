@@ -3,6 +3,7 @@ __pycache__/
 .DS_Store
 .vscode/
 .idea/
+.claude/
 
 # Training outputs
 runs/

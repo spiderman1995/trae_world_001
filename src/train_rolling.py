@@ -17,7 +17,9 @@ import pandas as pd
 import numpy as np
 import glob
 
-from src.data.dataset import StockDataset
+import signal
+
+from src.data.dataset import StockDataset, GlobalDataCache
 from src.data.stock_pool import StockPool
 from src.data.chinext50 import get_chinext50_constituents
 from src.models.feature_extractor import FeatureExtractor
@@ -25,6 +27,23 @@ from src.models.transformer import StockViT
 from src.models.loss import MultiTaskLoss, PeakDayLoss
 from src.config import DATA_DIR
 import platform
+
+# ---- 优雅停止：Ctrl+C 完成当前epoch后退出 ----
+_stop_requested = False
+
+def _handle_stop(signum, frame):
+    global _stop_requested
+    if _stop_requested:
+        print("\nForce exit!")
+        sys.exit(1)
+    _stop_requested = True
+    print("\n" + "=" * 50)
+    print(" STOP REQUESTED — finishing current epoch...")
+    print("=" * 50)
+
+signal.signal(signal.SIGINT, _handle_stop)
+if hasattr(signal, 'SIGTERM'):
+    signal.signal(signal.SIGTERM, _handle_stop)
 
 # Setup Logging
 def setup_logging(output_dir, fold_idx=0):
@@ -54,13 +73,17 @@ def setup_logging(output_dir, fold_idx=0):
     
     return logger
 
-def set_seed(seed):
+def set_seed(seed, benchmark=False):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    if benchmark:
+        torch.backends.cudnn.deterministic = False
+        torch.backends.cudnn.benchmark = True
+    else:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 def get_sorted_dates(data_dir):
     files = sorted(glob.glob(os.path.join(data_dir, "daily_summary_*.csv")))
@@ -132,7 +155,7 @@ def get_period_by_day_range(dates, day_range):
     )
 
 def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range, test_range,
-                   checkpoint_path=None, stock_pool=None):
+                   checkpoint_path=None, stock_pool=None, sampled_stocks=None, global_cache=None):
     fold_dir = os.path.join(args.output_dir, f"fold_{fold_idx}")
     os.makedirs(fold_dir, exist_ok=True)
 
@@ -143,22 +166,23 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
     logger.info(f"Train Period: {train_period[0]} to {train_period[1]}")
     logger.info(f"Test Period: {test_period[0]} to {test_period[1]}")
 
-    # 股票采样
-    if args.stock_pool == "random" and stock_pool is not None:
-        sampled_stocks = stock_pool.sample_stocks(
-            n=args.num_stocks,
-            start_date=train_period[0],
-            end_date=test_period[1],
-            min_trading_days=args.seq_len + args.pred_len,
-            stock_prefix=("30", "31"),
-            min_list_days=args.min_list_days,
-            exclude_delisted=True,
-            seed=args.seed + fold_idx,
-        )
-        logger.info(f"Random sampled {len(sampled_stocks)} stocks for this fold.")
-    else:
-        sampled_stocks = list(get_chinext50_constituents())
-        logger.info(f"Using ChiNext50 ({len(sampled_stocks)} stocks).")
+    # 股票采样（如果未由 main 预计算）
+    if sampled_stocks is None:
+        if args.stock_pool == "random" and stock_pool is not None:
+            # 注意：end_date 只用到训练期末，避免用测试期的退市/停牌信息做筛选（未来信息泄漏）
+            sampled_stocks = stock_pool.sample_stocks(
+                n=args.num_stocks,
+                start_date=train_period[0],
+                end_date=train_period[1],
+                min_trading_days=args.seq_len + args.pred_len,
+                stock_prefix=("30", "31"),
+                min_list_days=args.min_list_days,
+                exclude_delisted=True,
+                seed=args.seed + fold_idx,
+            )
+        else:
+            sampled_stocks = list(get_chinext50_constituents())
+    logger.info(f"Using {len(sampled_stocks)} stocks for this fold.")
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
@@ -217,6 +241,7 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
         end_date=train_period[1],
         stock_ids=sampled_stocks,
         sample_stride=args.sample_stride,
+        global_cache=global_cache,
     )
     train_size = len(train_dataset)
     num_train_stocks = len(set(idx[0] for idx in train_dataset.indices))
@@ -252,6 +277,7 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
         std=train_dataset.std,
         stock_ids=sampled_stocks,
         sample_stride=args.sample_stride,
+        global_cache=global_cache,
     )
     test_size = len(val_dataset)
     logger.info(f"Val dataset size: {test_size}")
@@ -269,6 +295,12 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
     best_val_loss = float("inf")
     best_topk_max = 0.0
     best_topk_min = 0.0
+    best_epoch = 0
+    best_rank_ic_max = 0.0
+    best_rank_ic_min = 0.0
+    best_train_loss = float("inf")
+    log_var_max_day_peak = -float("inf")
+    log_var_min_day_peak = -float("inf")
     patience_counter = 0
     best_model_path = os.path.join(fold_dir, "model_best.pth")
 
@@ -283,12 +315,12 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
             if epoch == 0 and batch_idx == 0:
                 logger.info(f"Data shape per batch: [Batch, Seq_Len, Channels, Tick_Len] = {list(seq_data.shape)}")
             B, Seq, C, L = seq_data.shape
-            seq_data_flat = seq_data.view(B * Seq, C, L).to(device)
+            seq_data_flat = seq_data.view(B * Seq, C, L).to(device, non_blocking=True)
 
-            target_max_value = targets['max_value'].to(device)
-            target_min_value = targets['min_value'].to(device)
-            target_max_day = targets['max_day'].to(device)
-            target_min_day = targets['min_day'].to(device)
+            target_max_value = targets['max_value'].to(device, non_blocking=True)
+            target_min_value = targets['min_value'].to(device, non_blocking=True)
+            target_max_day = targets['max_day'].to(device, non_blocking=True)
+            target_min_day = targets['min_day'].to(device, non_blocking=True)
 
             optimizer.zero_grad()
 
@@ -310,12 +342,29 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
                 losses_list = torch.stack([loss_max_value, loss_min_value, loss_max_day, loss_min_day])
                 total_loss = mtl_loss_wrapper(losses_list)
 
+            # NaN/Inf 检测：避免训练数小时后才发现 loss 已崩
+            if not torch.isfinite(total_loss):
+                logger.error(f"Fold {fold_idx} epoch {epoch+1} batch {batch_idx}: "
+                             f"non-finite loss detected ({total_loss.item()}). "
+                             f"Skipping batch. Check grad explosion, bad data, or mixed-precision issues.")
+                optimizer.zero_grad()
+                continue
+
             scaler.scale(total_loss).backward()
             if args.max_grad_norm > 0:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(params, args.max_grad_norm)
             scaler.step(optimizer)
             scaler.update()
+
+            # 首 batch 报告 GPU 显存实际占用（用户可据此调 batch_size）
+            if epoch == 0 and batch_idx == 0 and device.type == 'cuda':
+                alloc_gb = torch.cuda.memory_allocated(device) / (1024 ** 3)
+                reserved_gb = torch.cuda.memory_reserved(device) / (1024 ** 3)
+                total_gb = torch.cuda.get_device_properties(device).total_memory / (1024 ** 3)
+                logger.info(f"GPU memory after first batch: allocated={alloc_gb:.2f}GB, "
+                            f"reserved={reserved_gb:.2f}GB / total={total_gb:.0f}GB "
+                            f"({reserved_gb/total_gb*100:.0f}% utilized)")
 
             global_step += 1
             epoch_train_loss += total_loss.item()
@@ -329,7 +378,10 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
                 writer.add_scalar("Train/loss_min_day", loss_min_day.item(), global_step)
                 for i, name in enumerate(["max_val", "min_val", "max_day", "min_day"]):
                     writer.add_scalar(f"Train/log_var_{name}", mtl_loss_wrapper.log_vars[i].item(), global_step)
-            pbar.set_postfix({"Loss": f"{total_loss.item():.4f}"})
+            postfix = {"Loss": f"{total_loss.item():.4f}"}
+            if _stop_requested:
+                postfix["STATUS"] = "STOPPING"
+            pbar.set_postfix(postfix)
 
         mean_train_loss = epoch_train_loss / max(epoch_train_steps, 1)
         writer.add_scalar("Train/Loss_epoch", mean_train_loss, epoch + 1)
@@ -364,10 +416,19 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
             f"RankIC_max={rank_ic_max:.4f}, RankIC_min={rank_ic_min:.4f}, LR={current_lr:.2e}"
         )
 
+        # 追踪 log_var 峰值（判断模型是否在"放弃"某任务）
+        log_var_max_day_peak = max(log_var_max_day_peak, mtl_loss_wrapper.log_vars[2].item())
+        log_var_min_day_peak = max(log_var_min_day_peak, mtl_loss_wrapper.log_vars[3].item())
+        if mean_train_loss < best_train_loss:
+            best_train_loss = mean_train_loss
+
         if val_loss < best_val_loss - args.min_delta:
             best_val_loss = val_loss
             best_topk_max = topk_max
             best_topk_min = topk_min
+            best_epoch = epoch + 1
+            best_rank_ic_max = rank_ic_max
+            best_rank_ic_min = rank_ic_min
             patience_counter = 0
             torch.save({
                 'feature_extractor': feature_extractor.state_dict(),
@@ -396,6 +457,10 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
                 logger.info(f"Fold {fold_idx} early stopped at epoch {epoch+1}.")
                 break
 
+        if _stop_requested:
+            logger.info(f"Fold {fold_idx} graceful stop at epoch {epoch+1}, saving best model.")
+            break
+
     model_save_path = os.path.join(fold_dir, "model_final.pth")
     if os.path.exists(best_model_path):
         best_ckpt = torch.load(best_model_path, map_location="cpu")
@@ -420,12 +485,68 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
             'best_topk_min': best_topk_min,
         }, model_save_path)
 
-    logger.info(f"Fold {fold_idx} Best Val Loss: {best_val_loss:.4f}")
+    logger.info(f"Fold {fold_idx} Best Val Loss: {best_val_loss:.4f} (epoch {best_epoch})")
     logger.info(f"Fold {fold_idx} Best Top{args.topk} Max-Day Acc: {best_topk_max:.4f}")
     logger.info(f"Fold {fold_idx} Best Top{args.topk} Min-Day Acc: {best_topk_min:.4f}")
+
+    # ---- Fold Doctor：基于已有指标做方向性诊断，给出调整建议 ----
+    logger.info(f"--- Fold {fold_idx} Doctor ---")
+    gap = best_val_loss - best_train_loss
+
+    # 1. best_epoch 位置 — 指示 lr / patience / epochs 是否合适
+    if best_epoch == 1:
+        logger.warning(f"  [HINT] best_epoch=1 → lr may be too large (overshooting), "
+                       f"or data too easy. Try --lr {args.lr * 0.3:.1e}")
+    elif best_epoch >= args.epochs - 1:
+        logger.warning(f"  [HINT] best_epoch={best_epoch}/{args.epochs} → model may still be learning, "
+                       f"consider --epochs {args.epochs + 10}")
+    elif best_epoch <= 3:
+        logger.info(f"  [INFO] best_epoch={best_epoch} is early, confirm patience={args.patience} "
+                    f"isn't cutting off useful learning")
+
+    # 2. train-val gap — 过拟合程度
+    if gap > best_train_loss * 0.5:
+        logger.warning(f"  [HINT] train-val gap large ({gap:.3f} = {gap/best_train_loss*100:.0f}% of train). "
+                       f"Consider: ↑weight_decay ({args.weight_decay} → {args.weight_decay*2:.0e}), "
+                       f"↑drop_ratio ({args.drop_ratio} → {min(args.drop_ratio+0.1, 0.5):.1f})")
+
+    # 3. RankIC 健康
+    if best_rank_ic_max < 0 or best_rank_ic_min < 0:
+        logger.warning(f"  [HINT] RankIC negative (max={best_rank_ic_max:.3f}, min={best_rank_ic_min:.3f}) → "
+                       f"model may be predicting inverse direction, check label construction")
+    elif best_rank_ic_max < 0.01 and best_rank_ic_min < 0.01:
+        logger.warning(f"  [HINT] RankIC near zero (max={best_rank_ic_max:.3f}, min={best_rank_ic_min:.3f}) → "
+                       f"value heads found no signal, check pred_len or feature set")
+
+    # 4. log_var 放弃警告（MTL 把某任务权重压得很低）
+    if log_var_max_day_peak > 0.5:
+        logger.warning(f"  [HINT] log_var_max_day peaked at {log_var_max_day_peak:.2f} "
+                       f"(weight={2.71828**-log_var_max_day_peak:.2f}) → max_day task is being abandoned by MTL. "
+                       f"Consider: ↑day_sigma (smoother target), freeze log_var, or add day-head regularization")
+    if log_var_min_day_peak > 0.5:
+        logger.warning(f"  [HINT] log_var_min_day peaked at {log_var_min_day_peak:.2f} → min_day task being abandoned")
+
+    # 5. Top1_MinDay 假高分
+    if best_topk_min > 0.95:
+        logger.info(f"  [INFO] Top1_MinDay={best_topk_min:.3f} suspiciously high — "
+                    f"likely predicting dominant mode day (skewed distribution), not real predictive skill")
+
+    logger.info(f"--- end Fold {fold_idx} Doctor ---")
     writer.close()
 
-    return train_size, test_size, model_save_path
+    return {
+        'train_size': train_size,
+        'test_size': test_size,
+        'model_save_path': model_save_path,
+        'best_val_loss': best_val_loss,
+        'best_topk_max': best_topk_max,
+        'best_topk_min': best_topk_min,
+        'best_epoch': best_epoch,
+        'best_rank_ic_max': best_rank_ic_max,
+        'best_rank_ic_min': best_rank_ic_min,
+        'best_train_loss': best_train_loss,
+        'log_var_max_day_peak': log_var_max_day_peak,
+    }
 
 def validate(feature_extractor, vit_model, mtl_loss_wrapper, loader, device, criterion_day, criterion_value, topk, fold_idx):
     feature_extractor.eval()
@@ -448,12 +569,12 @@ def validate(feature_extractor, vit_model, mtl_loss_wrapper, loader, device, cri
         pbar = tqdm(loader, desc=f"Fold {fold_idx} Val", unit="batch", leave=True)
         for seq_data, targets in pbar:
             B, Seq, C, L = seq_data.shape
-            seq_data_flat = seq_data.view(B * Seq, C, L).to(device)
+            seq_data_flat = seq_data.view(B * Seq, C, L).to(device, non_blocking=True)
 
-            target_max_value = targets['max_value'].to(device)
-            target_min_value = targets['min_value'].to(device)
-            target_max_day = targets['max_day'].to(device)
-            target_min_day = targets['min_day'].to(device)
+            target_max_value = targets['max_value'].to(device, non_blocking=True)
+            target_min_value = targets['min_value'].to(device, non_blocking=True)
+            target_max_day = targets['max_day'].to(device, non_blocking=True)
+            target_min_day = targets['min_day'].to(device, non_blocking=True)
 
             features_flat = feature_extractor(seq_data_flat)
             features_seq = features_flat.view(B, Seq, -1)
@@ -530,7 +651,7 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=5e-3)
     parser.add_argument("--drop_ratio", type=float, default=0.2)
     parser.add_argument("--attn_drop_ratio", type=float, default=0.2)
-    parser.add_argument("--patience", type=int, default=10)
+    parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--min_delta", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--scheduler", type=str, default="cosine", choices=["none", "cosine", "plateau"],
@@ -549,9 +670,116 @@ def main():
     parser.add_argument("--num_workers", type=int, default=4, help="DataLoader num_workers (0=main thread)")
     # Loss
     parser.add_argument("--smooth_l1_beta", type=float, default=0.1, help="SmoothL1Loss beta (transition point from L2 to L1)")
+    # 性能
+    parser.add_argument("--cudnn_benchmark", action="store_true", help="Enable cudnn.benchmark (faster conv, non-deterministic)")
+    parser.add_argument("--preload", type=str, default="auto", choices=["auto", "on", "off"],
+                        help="Pre-load all data into memory to avoid repeated CSV reads across folds (auto/on/off)")
 
     args = parser.parse_args()
-    set_seed(args.seed)
+    set_seed(args.seed, benchmark=args.cudnn_benchmark)
+
+    # ---- 启动自检（新环境容易漏掉的优化项 + sanity check）----
+    print("\n" + "=" * 60)
+    print(" Startup self-check")
+    print("=" * 60)
+
+    # 1. 性能优化项
+    from src.data.dataset import _CSV_ENGINE
+    if _CSV_ENGINE == "pyarrow":
+        print(" [OK]   pyarrow detected → CSV parsing 2-3x faster")
+    else:
+        print(" [HINT] pyarrow NOT installed → `pip install pyarrow` for 2-3x faster CSV reads")
+
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_mem_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+        print(f" [OK]   CUDA: {gpu_name} ({gpu_mem_gb:.0f} GB)")
+        if args.batch_size >= 64 and gpu_mem_gb < 24:
+            print(f" [WARN] batch_size={args.batch_size} on {gpu_mem_gb:.0f}GB GPU may OOM → try 16-32")
+        if args.cudnn_benchmark:
+            print(" [OK]   cudnn.benchmark=True → Conv auto-selects fastest algorithm")
+        else:
+            print(" [HINT] cudnn.benchmark=False → add --cudnn_benchmark for 5-15% Conv speedup")
+    else:
+        print(" [WARN] CUDA NOT available, training on CPU will be very slow")
+
+    if args.num_workers == 0:
+        print(" [HINT] DataLoader num_workers=0 → add --num_workers 4 for parallel data prep (ignored on Windows)")
+    else:
+        print(f" [OK]   DataLoader num_workers={args.num_workers}")
+
+    if torch.__version__.startswith("1."):
+        print(f" [INFO] PyTorch {torch.__version__} (legacy). Flash Attention & torch.compile require 2.0+")
+    else:
+        print(f" [OK]   PyTorch {torch.__version__}")
+
+    # 2. 数据与输出 sanity check
+    print()
+    csv_files = glob.glob(os.path.join(args.data_dir, "daily_summary_*.csv"))
+    if not csv_files:
+        print(f" [ERROR] No CSV files found in {args.data_dir}")
+    else:
+        print(f" [OK]   Data dir: {len(csv_files)} CSV files at {args.data_dir}")
+        cache_files = glob.glob(os.path.join(args.data_dir, ".stock_pool_cache_*.pkl"))
+        if cache_files:
+            print(f" [OK]   StockPool cache exists ({len(cache_files)} file(s)) → fast load")
+        else:
+            print(" [INFO] StockPool cache NOT found → first scan takes ~minutes")
+
+    if os.path.exists(args.output_dir):
+        existing_folds = glob.glob(os.path.join(args.output_dir, "fold_*"))
+        if existing_folds:
+            print(f" [WARN] Output dir {args.output_dir} has {len(existing_folds)} existing fold_*/ dirs → "
+                  f"will OVERWRITE. Ctrl+C to abort, rename if you want to keep them.")
+        else:
+            print(f" [OK]   Output dir {args.output_dir} exists but empty")
+    else:
+        print(f" [OK]   Output dir {args.output_dir} (will be created)")
+
+    # 3. warm-start / resume 状态
+    if args.resume_from:
+        if os.path.exists(args.resume_from):
+            print(f" [OK]   Warm-start from {args.resume_from}")
+        else:
+            print(f" [ERROR] --resume_from path does not exist: {args.resume_from}")
+    else:
+        print(" [INFO] No --resume_from, fold 1 trains from random init. "
+              "Fold N+1 warm-starts from fold N automatically.")
+
+    # 4. 磁盘空间（checkpoint 写盘）
+    import shutil
+    out_parent = os.path.dirname(os.path.abspath(args.output_dir)) or "."
+    free_gb = shutil.disk_usage(out_parent).free / (1024 ** 3)
+    if free_gb < 10:
+        print(f" [WARN] Only {free_gb:.1f}GB free on {out_parent} → checkpoints (~100MB each) may fail")
+    else:
+        print(f" [OK]   Disk space: {free_gb:.0f}GB free on {out_parent}")
+
+    # 5. Git commit（可复现性）
+    try:
+        import subprocess
+        git_hash = subprocess.check_output(
+            ['git', 'rev-parse', '--short', 'HEAD'],
+            stderr=subprocess.DEVNULL, cwd=os.path.dirname(os.path.abspath(__file__))
+        ).decode().strip()
+        dirty = subprocess.check_output(
+            ['git', 'status', '--porcelain'],
+            stderr=subprocess.DEVNULL, cwd=os.path.dirname(os.path.abspath(__file__))
+        ).decode().strip()
+        suffix = " (+uncommitted changes)" if dirty else ""
+        print(f" [OK]   Git commit: {git_hash}{suffix}")
+    except Exception:
+        print(" [INFO] Not a git repo (or git unavailable)")
+
+    print("=" * 60 + "\n")
+
+    # 最终生效的 args（方便复现和排错）
+    print("=" * 60)
+    print(" Final args")
+    print("=" * 60)
+    for k, v in sorted(vars(args).items()):
+        print(f"   {k:20s} = {v}")
+    print("=" * 60 + "\n")
 
     # 参数校验
     if args.train_days < args.seq_len + args.pred_len:
@@ -572,17 +800,79 @@ def main():
 
     folds = build_day_range_folds(dates, args.train_days, args.test_days, args.step_days)
 
-    # 初始化股票池（只扫描一次，所有fold共用）
+    # 4. 训练规模预估
+    samples_per_stock_per_fold = max(0, (args.train_days - args.seq_len - args.pred_len) // args.sample_stride + 1)
+    est_samples_per_fold = samples_per_stock_per_fold * args.num_stocks
+    est_batches_per_epoch = est_samples_per_fold // args.batch_size
+    print("=" * 60)
+    print(" Training scale estimate")
+    print("=" * 60)
+    print(f" Total folds:                {len(folds)}")
+    print(f" Samples/stock/fold:         {samples_per_stock_per_fold}")
+    print(f" Samples/fold (est):         ~{est_samples_per_fold:,} (× {args.num_stocks} stocks)")
+    print(f" Batches/epoch (est):        ~{est_batches_per_epoch:,}")
+    print(f" Max epochs/fold:            {args.epochs} (early stop patience={args.patience})")
+    print(f" Train period first fold:    {folds[0]['train_period'][0]} .. {folds[0]['train_period'][1]}")
+    print(f" Test  period last  fold:    {folds[-1]['test_period'][0]} .. {folds[-1]['test_period'][1]}")
+    print("=" * 60 + "\n")
+
+    # ---- 预计算股票采样 + 数据预加载 ----
     pool = None
+    global_cache = None
+    fold_stocks = {}
+
     if args.stock_pool == "random":
         print("Scanning stock pool (one-time)...")
         pool = StockPool(args.data_dir, start_date=args.start_date, end_date=args.end_date)
 
+        # 预计算所有fold的股票采样
+        # 注意：end_date 只用到训练期末，避免用测试期的退市/停牌信息做筛选（未来信息泄漏）
+        all_needed_stocks = set()
+        for i, fold in enumerate(folds):
+            fold_idx = i + 1
+            sampled = pool.sample_stocks(
+                n=args.num_stocks,
+                start_date=fold["train_period"][0],
+                end_date=fold["train_period"][1],
+                min_trading_days=args.seq_len + args.pred_len,
+                stock_prefix=("30", "31"),
+                min_list_days=args.min_list_days,
+                exclude_delisted=True,
+                seed=args.seed + fold_idx,
+            )
+            fold_stocks[fold_idx] = sampled
+            all_needed_stocks.update(sampled)
+
+        print(f"Unique stocks across all folds: {len(all_needed_stocks)}")
+
+        # 预加载判断
+        est_mem_gb = len(all_needed_stocks) * len(dates) * 18 * 1424 * 4 * 2 / (1024 ** 3)
+        do_preload = (args.preload == "on" or
+                      (args.preload == "auto" and est_mem_gb < 128))
+
+        if do_preload:
+            print(f"Pre-loading data (estimated {est_mem_gb:.1f} GB)...")
+            global_cache = GlobalDataCache(
+                args.data_dir, all_needed_stocks,
+                start_date=dates[0].strftime("%Y-%m-%d"),
+                end_date=dates[-1].strftime("%Y-%m-%d"),
+            )
+        else:
+            print(f"Skipping preload (estimated {est_mem_gb:.1f} GB > 128 GB limit). Per-fold CSV loading.")
+
+    import time
+    overall_start = time.time()
+
     previous_model_path = args.resume_from
     fold_summaries = []
     for i, fold in enumerate(folds):
+        if _stop_requested:
+            print(f"\nGraceful stop before fold {i+1}. Completed {i} folds.")
+            break
+
+        fold_start = time.time()
         print(f"\n{'='*20} Running Fold {i+1} {'='*20}")
-        train_size, test_size, model_save_path = train_one_fold(
+        result = train_one_fold(
             args,
             i+1,
             dates,
@@ -592,21 +882,70 @@ def main():
             fold["test_range"],
             checkpoint_path=previous_model_path,
             stock_pool=pool,
+            sampled_stocks=fold_stocks.get(i+1),
+            global_cache=global_cache,
         )
-        previous_model_path = model_save_path # Update for the next fold
+        fold_elapsed = time.time() - fold_start
+        previous_model_path = result['model_save_path']
         fold_summaries.append({
             "Fold": i + 1,
-            "Train Period": f"{fold['train_period'][0]} to {fold['train_period'][1]}",
-            "Test Period": f"{fold['test_period'][0]} to {fold['test_period'][1]}",
-            "Num Train Samples": train_size,
-            "Num Test Samples": test_size
+            "Test Period": f"{fold['test_period'][0][:7]}..{fold['test_period'][1][:7]}",
+            "Samples": result['train_size'],
+            "BestEp": result['best_epoch'],
+            "ValLoss": round(result['best_val_loss'], 4),
+            "Top1_Max": round(result['best_topk_max'], 3),
+            "IC_max": round(result['best_rank_ic_max'], 3),
+            "IC_min": round(result['best_rank_ic_min'], 3),
+            "Min": round(fold_elapsed / 60, 1),
         })
 
-    # 打印最终的总结报告
-    print(f"\n\n{'='*25} Training Summary Report {'='*25}")
+        # ---- Trend Watch：每 3 fold 做一次跨 fold 漂移检查 ----
+        if len(fold_summaries) >= 6 and (i + 1) % 3 == 0:
+            recent_vals = [s['ValLoss'] for s in fold_summaries[-3:]]
+            early_vals = [s['ValLoss'] for s in fold_summaries[:3]]
+            recent_mean = sum(recent_vals) / 3
+            early_mean = sum(early_vals) / 3
+            recent_ic = [s['IC_max'] for s in fold_summaries[-3:]]
+
+            if recent_mean > early_mean * 1.3:
+                print(f"\n[TREND WARN] Recent 3 folds ValLoss avg={recent_mean:.3f} is "
+                      f"{recent_mean/early_mean:.1f}x early avg ({early_mean:.3f}). "
+                      f"Likely overfitting accumulation. Consider stopping or switching strategy.")
+
+            if all(ic < 0.01 for ic in recent_ic):
+                print(f"\n[TREND WARN] Recent 3 folds all RankIC_max < 0.01 ({recent_ic}). "
+                      f"Value head predictive signal degraded. Check pred_len / features / regime shift.")
+
+    overall_elapsed = time.time() - overall_start
+
+    # ---- 事后总结报告 ----
+    print(f"\n\n{'='*30} Training Summary Report {'='*30}")
     summary_df = pd.DataFrame(fold_summaries)
-    print(summary_df.to_string())
-    print(f"{'='*75}")
+    print(summary_df.to_string(index=False))
+    print(f"{'='*85}")
+
+    if fold_summaries:
+        # 最佳 fold 推荐（用于回测）
+        best_row = min(fold_summaries, key=lambda r: r["Best ValLoss"])
+        mean_val = sum(r["Best ValLoss"] for r in fold_summaries) / len(fold_summaries)
+        print(f"\n Total folds completed:     {len(fold_summaries)} / {len(folds)}")
+        print(f" Total training time:       {overall_elapsed/60:.1f} min ({overall_elapsed/3600:.2f} h)")
+        print(f" Mean Best ValLoss:         {mean_val:.4f}")
+        best_fold_num = best_row['Fold']
+        best_ckpt_path = os.path.join(args.output_dir, f'fold_{best_fold_num}', 'model_final.pth')
+        print(f" Best fold (lowest ValLoss): Fold {best_fold_num} → ValLoss={best_row['Best ValLoss']:.4f}")
+        print(f" Recommended checkpoint:    {best_ckpt_path}")
+
+        # 诊断性提示
+        val_losses = [r["Best ValLoss"] for r in fold_summaries]
+        if len(val_losses) >= 3:
+            trend_recent = sum(val_losses[-3:]) / 3
+            trend_early = sum(val_losses[:3]) / 3
+            if trend_recent > trend_early * 1.3:
+                print(f" [WARN] Val loss in recent folds ({trend_recent:.3f}) is {trend_recent/trend_early:.1f}x "
+                      f"higher than early folds ({trend_early:.3f}) → possible overfitting / drift, "
+                      f"use early fold checkpoint for backtest.")
+    print(f"{'='*85}")
 
 if __name__ == "__main__":
     main()

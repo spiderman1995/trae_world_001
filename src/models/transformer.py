@@ -107,8 +107,15 @@ class StockViT(nn.Module):
 
         self.head_max_value = nn.Linear(embed_dim, 1)
         self.head_min_value = nn.Linear(embed_dim, 1)
-        self.head_max_day = nn.Linear(embed_dim, pred_len)
-        self.head_min_day = nn.Linear(embed_dim, pred_len)
+        # day 头单独加重 Dropout，抑制其过拟合污染共享特征（v7 观察到 max_day 是 val loss 发散的主因）
+        self.head_max_day = nn.Sequential(
+            nn.Dropout(0.5),
+            nn.Linear(embed_dim, pred_len),
+        )
+        self.head_min_day = nn.Sequential(
+            nn.Dropout(0.5),
+            nn.Linear(embed_dim, pred_len),
+        )
 
         # Init weights
         nn.init.trunc_normal_(self.pos_embed, std=0.02)

@@ -4,7 +4,44 @@
 
 
 ================================================================================
-#5  2026-04-21  runs_rolling_v7（待训练，服��器203）
+#6  2026-04-24  runs_rolling_v8（准备训练，本地/服务器）
+================================================================================
+
+训练脚本（Windows本地）：
+python -m src.train_rolling --data_dir "D:/temp/0_tempdata8" --output_dir "runs_rolling_v8" --day_sigma 2.0 --num_stocks 500 --epochs 20 --batch_size 16
+
+训练脚本（服务器）：
+python -m src.train_rolling --data_dir /path/to/pre_process/version1 --output_dir runs_rolling_v8 --day_sigma 2.0 --num_stocks 500 --sample_stride 10 --seq_len 180 --pred_len 15 --train_days 480 --test_days 60 --step_days 10 --epochs 20 --batch_size 32 --preload auto --cudnn_benchmark
+
+相比 v7 的改动（仅 2 处，集中打 day 头过拟合）：
+1. ViT 的 head_max_day/head_min_day 前加 Dropout(0.5)
+   （value 头不动，避免误伤）
+2. --day_sigma 1.0 → 2.0（PeakDayLoss 目标分布放宽一半）
+
+其他 v7 配置全部保留：
+- seq_len=180, pred_len=15, train_days=480, test_days=60, step_days=10
+- num_stocks=500, sample_stride=10
+- weight_decay=5e-3, drop_ratio=0.2, attn_drop_ratio=0.2
+- patience=5, smooth_l1_beta=0.1
+- scheduler=cosine, max_grad_norm=1.0
+
+v7 未验证的假说（等 v8 验证）：
+- Warm-start 跨 fold 累积污染：如果 v8 后期 fold 不再发散，说明 Dropout 已压住问题
+  （详见 inspiration #15）
+- 若 v8 后期仍退化，再上 inspiration #16（Warm-start 只加载 CNN）
+
+TensorBoard 观察要点（判断 v8 是否奏效）：
+- Train/log_var_max_day 是否稳定在 0 附近（v7 涨到 +0.4）
+- Val/loss_max_day 是否不再 train↓ val↑ 剪刀差（v7 val 从 2 涨到 4）
+- Val/Loss_epoch 是否不再后期单调上升（v7 从 2 涨到 5）
+- Val/RankIC_max_value 能否稳定在 0.05+（v7 降到 0 附近）
+
+训练结果：
+（待填写）
+
+
+================================================================================
+#5  2026-04-21  runs_rolling_v7（已完成 11 fold+，2026-04-23 观察到后期退化）
 ================================================================================
 
 训练脚本：
@@ -37,8 +74,43 @@ python -m src.train_rolling --data_dir E:/pre_process/version1 --train_days 480 
 - CNN参数减半→每batch前向传播更快
 - 重点观察：val_loss是否比v6有下降趋势，RankIC是否>0.03
 
-训练结果：
-（待填写）
+训练结果（TensorBoard 观察，约 11 fold）：
+
+  早期 fold（1-5）：
+  - Train Loss: 正常下降
+  - Val Loss: 2~3 之间，U 型曲线，最佳 epoch 在 5-8
+  - RankIC_max_value: 部分 fold 达到 0.05-0.09（value 头有弱预测力）
+  - Top1_MaxDay: 0.22-0.34（略优于随机 20%）
+  - Top1_MinDay: 0.98（虚高，最低价偏态分布，模型赌众数）
+  - log_var_max_day: 缓慢上升（MTL 正确保护 max_day）
+
+  后期 fold（9-11+）：
+  - Train/loss_max_day: 从 1.4 持续降到 0.2（训练集完全背熟）
+  - Val/loss_max_day: 从 2 涨到 4（完全不泛化）← 剪刀差
+  - Val/Loss_epoch: 后期蓝线从 2 单调上升到 5
+  - Val/loss_max_value: 0.042 → 0.054（轻微恶化）
+  - Val/RankIC_max_value: 降到 0 附近甚至负值（value 头预测力失效）
+  - log_var_max_day: 升至 +0.4（权重降到 0.67，但仍压不住）
+  - log_var_max_val / log_var_min_day / log_var_min_val: 均下降到 -0.25 ~ -0.45
+    （其他任务在抢资源）
+
+  诊断：
+  - 根本病灶：max_day 头严重过拟合，污染共享的 CNN+Transformer 特征
+  - MTL 的 log_var 自我保护机制正常工作，但降权速度不够
+  - 连累 value 头：RankIC 随训练进行下降
+  - 假设二因素叠加：① day 头任务本身难学（15分类，日期信号弱）
+                      ② Warm-start 跨 fold 累积污染（11 个 fold 特化偏置叠加）
+
+  结论：
+  - 训练不值得继续，最佳 checkpoint 在前 5-8 fold
+  - 基线不稳定，需要先修复 day 头过拟合问题
+  - v8 已准备：day 头 Dropout(0.5) + day_sigma 2.0
+  - 回测如果要做，用前 5-8 fold 的 best model，不要用最后一个 fold
+
+  副产品发现：
+  - Top1_MinDay 长期 0.98 是"赌众数"假高分，min_day 分布高度偏态
+    （min 经常落在窗口第 0 天或最后 1 天）
+  - 暗示 min_day 任务本身就是坏定义，需要重新审视
 
 
 ================================================================================

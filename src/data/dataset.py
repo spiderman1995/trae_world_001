@@ -27,9 +27,197 @@ def trim_auction_zeros(arr):
     return np.concatenate([arr[..., :AUCTION_ZERO_START], arr[..., AUCTION_ZERO_END:]], axis=-1)
 
 
+# pyarrow 可选加速（pandas read_csv 引擎，2-3x 更快）
+try:
+    import pyarrow  # noqa: F401
+    _CSV_ENGINE = "pyarrow"
+except ImportError:
+    _CSV_ENGINE = None
+
+
+def _read_csvs_to_per_stock_arrays(filtered_files, valid_stock_ids, desc="Reading CSVs"):
+    """共享的 CSV 读取 + 按股票聚合（供 StockDataset 和 GlobalDataCache 复用）。
+
+    - 8 线程并行读 CSV（用 pyarrow 引擎如果可用）
+    - NaN/Inf 插值填充（只在 read 阶段做一次）
+    - 裁剪集合竞价零行 → [18, 1424]
+
+    Returns:
+        {stock_id: {'data': ndarray[D, 18, 1424] float32, 'dates': [Timestamp]}}
+    """
+    logger = logging.getLogger(__name__)
+    if not filtered_files:
+        return {}
+
+    def _to_sid(value):
+        if isinstance(value, (int, np.integer)):
+            return f"{int(value):06d}"
+        return str(value).strip()
+
+    def _read_one_csv(f):
+        if _CSV_ENGINE:
+            df = pd.read_csv(f, engine=_CSV_ENGINE)
+        else:
+            df = pd.read_csv(f)
+        if "StockID" not in df.columns or "Time" not in df.columns:
+            raise ValueError(f"Invalid CSV schema. file={f}")
+        feature_cols = [c for c in df.columns if c not in ("StockID", "Time")]
+        if len(feature_cols) != 18:
+            raise ValueError(f"Expected 18 feature cols. file={f}")
+        df[feature_cols] = df[feature_cols].apply(pd.to_numeric, errors="coerce")
+        df[feature_cols] = df[feature_cols].replace([np.inf, -np.inf], np.nan)
+        if df[feature_cols].isna().any().any():
+            nan_count = df[feature_cols].isna().sum().sum()
+            df[feature_cols] = df.groupby('StockID')[feature_cols].apply(
+                lambda g: g.interpolate(method='linear', limit_direction='both')
+            )
+            df[feature_cols] = df[feature_cols].fillna(0)
+            logger.warning("Interpolated %d NaN/Inf values in file=%s", nan_count, f)
+        basename = os.path.basename(f)
+        date_str = basename.replace("daily_summary_", "").replace(".csv", "")
+        df['date'] = pd.to_datetime(date_str)
+        return df
+
+    all_dfs = []
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {executor.submit(_read_one_csv, f): f for f in filtered_files}
+        for future in tqdm(as_completed(futures), total=len(futures), desc=desc):
+            f = futures[future]
+            try:
+                all_dfs.append(future.result())
+            except Exception as e:
+                logger.exception(f"Error reading {f}: {e}")
+
+    all_dfs.sort(key=lambda df: df['date'].iloc[0])
+    if not all_dfs:
+        return {}
+
+    stock_lists = {}
+    for day_df in all_dfs:
+        current_date = day_df['date'].iloc[0]
+        feature_cols = [c for c in day_df.columns if c not in ("StockID", "Time", "date")]
+
+        for stock_id_raw, group in day_df.groupby('StockID'):
+            stock_id = _to_sid(stock_id_raw)
+            if stock_id not in valid_stock_ids:
+                continue
+
+            feats = group[feature_cols].values
+            if feats.shape[1] != 18:
+                continue
+
+            if feats.shape[0] == RAW_TICKS:
+                feats = feats.T
+                feats = trim_auction_zeros(feats)
+            elif feats.shape[0] == CLEAN_TICKS:
+                feats = feats.T
+            else:
+                continue
+
+            if stock_id not in stock_lists:
+                stock_lists[stock_id] = {'data': [], 'dates': []}
+            stock_lists[stock_id]['data'].append(feats.astype(np.float32))
+            stock_lists[stock_id]['dates'].append(current_date)
+
+    result = {}
+    for stock_id, content in stock_lists.items():
+        if content['data']:
+            result[stock_id] = {
+                'data': np.stack(content['data']),
+                'dates': content['dates'],
+            }
+    return result
+
+
+class GlobalDataCache:
+    """一次性预加载所有需要的股票数据，供跨fold复用，避免重复读CSV。"""
+
+    def __init__(self, data_dir, stock_ids, start_date=None, end_date=None):
+        self.stock_ids = set(str(s) for s in stock_ids)
+        self._raw = {}
+        self._norm = {}
+        self._load(data_dir, start_date, end_date)
+
+    def _load(self, data_dir, start_date, end_date):
+        logger = logging.getLogger(__name__)
+        sd = pd.to_datetime(start_date) if start_date else None
+        ed = pd.to_datetime(end_date) if end_date else None
+
+        file_patterns = os.path.join(data_dir, "daily_summary_*.csv")
+        files = sorted(glob.glob(file_patterns))
+        filtered = []
+        for f in files:
+            basename = os.path.basename(f)
+            date_str = basename.replace("daily_summary_", "").replace(".csv", "")
+            try:
+                file_date = pd.to_datetime(date_str)
+            except Exception:
+                continue
+            if sd and file_date < sd:
+                continue
+            if ed and file_date > ed:
+                continue
+            filtered.append(f)
+
+        if not filtered:
+            logger.warning("GlobalDataCache: no CSV files found.")
+            return
+
+        logger.info(f"GlobalDataCache: loading {len(filtered)} files for {len(self.stock_ids)} stocks "
+                    f"(engine={_CSV_ENGINE or 'default'})...")
+        stock_arrays = _read_csvs_to_per_stock_arrays(
+            filtered, self.stock_ids, desc="GlobalCache loading"
+        )
+
+        for stock_id, content in stock_arrays.items():
+            raw = content['data']  # [D, 18, 1424] float32
+            self._raw[stock_id] = {'data': raw, 'dates': content['dates']}
+            normed = raw.copy()
+            normed[:, :6, :] = np.log1p(normed[:, :6, :])
+            self._norm[stock_id] = normed
+
+        logger.info(f"GlobalDataCache: {len(self._raw)} stocks, "
+                     f"{sum(v['data'].shape[0] for v in self._raw.values())} stock-days, "
+                     f"{self.memory_usage_gb():.1f} GB")
+
+    def slice(self, start_date, end_date, stock_ids):
+        """返回指定日期范围和股票子集的数据视图（numpy view，不拷贝）。"""
+        sd = pd.to_datetime(start_date) if isinstance(start_date, str) else start_date
+        ed = pd.to_datetime(end_date) if isinstance(end_date, str) else end_date
+        stock_set = set(str(s) for s in stock_ids)
+
+        raw_slice = {}
+        norm_slice = {}
+        for sid in stock_set:
+            if sid not in self._raw:
+                continue
+            dates = self._raw[sid]['dates']
+            s_idx = 0
+            while s_idx < len(dates) and dates[s_idx] < sd:
+                s_idx += 1
+            e_idx = len(dates)
+            while e_idx > s_idx and dates[e_idx - 1] > ed:
+                e_idx -= 1
+            if s_idx >= e_idx:
+                continue
+            raw_slice[sid] = {
+                'data': self._raw[sid]['data'][s_idx:e_idx],
+                'dates': dates[s_idx:e_idx],
+            }
+            norm_slice[sid] = self._norm[sid][s_idx:e_idx]
+
+        return raw_slice, norm_slice
+
+    def memory_usage_gb(self):
+        total = sum(v['data'].nbytes for v in self._raw.values())
+        total += sum(v.nbytes for v in self._norm.values())
+        return total / (1024 ** 3)
+
+
 class StockDataset(Dataset):
     def __init__(self, data_dir, seq_len=180, pred_len=60, start_date=None, end_date=None,
-                 mean=None, std=None, stock_ids=None, sample_stride=10):
+                 mean=None, std=None, stock_ids=None, sample_stride=10,
+                 global_cache=None):
         """
         Args:
             data_dir (str): Path to directory containing daily_summary_YYYY-MM-DD.csv files.
@@ -41,6 +229,7 @@ class StockDataset(Dataset):
             std (Tensor): Pre-computed std for normalization.
             stock_ids (list): Stock IDs to include. None = fallback to ChiNext50.
             sample_stride (int): Sliding window stride for sample generation. Default 10.
+            global_cache (GlobalDataCache): Pre-loaded data cache. None = read CSVs from disk.
         """
         self.data_dir = data_dir
         self.seq_len = seq_len
@@ -53,24 +242,29 @@ class StockDataset(Dataset):
             self.stock_ids = set(str(s) for s in stock_ids)
         else:
             self.stock_ids = set(get_chinext50_constituents())
-        
-        # 1. Get file list
-        self.filtered_files = self._get_filtered_files()
 
-        # 2. 一次读取：加载数据 + 计算统计量（如果需要）
         need_stats = (mean is None or std is None)
         if not need_stats:
             self.mean = mean
             self.std = std
-        self.stock_data, computed_mean, computed_std = self._load_data_and_stats(compute_stats=need_stats)
+
+        if global_cache is not None:
+            # 快速路径：从预加载缓存切片（numpy view，不重复读CSV）
+            self.stock_data, self.normalized_data = global_cache.slice(
+                start_date, end_date, self.stock_ids
+            )
+        else:
+            # 慢速路径：从磁盘读CSV
+            self.filtered_files = self._get_filtered_files()
+            self.stock_data = self._load_data()
+            self._prenormalize()
+
+        # mean/std 已被 RevIN 替代，仅为 checkpoint 兼容保留占位
         if need_stats:
-            self.mean = computed_mean
-            self.std = computed_std
+            self.mean = torch.zeros(18)
+            self.std = torch.ones(18)
 
-        # 3. 预归一化：一次性完成 log1p + z-score，避免 __getitem__ 重复计算
-        self._prenormalize()
-
-        # 4. Build index map (stock, start_index)
+        # Build index map (stock, start_index)
         self.indices = self._build_indices()
 
     def _get_filtered_files(self):
@@ -92,142 +286,18 @@ class StockDataset(Dataset):
                 continue
         return filtered_files
 
-    def _load_data_and_stats(self, compute_stats=True):
-        """
-        一次读取完成两件事：加载数据到内存 + 计算 mean/std（如需要）。
-        避免对同一批 CSV 文件重复读取。
-
-        Returns:
-            (stock_data_dict, mean_tensor_or_None, std_tensor_or_None)
-        """
+    def _load_data(self):
+        """读CSV并按股票聚合，返回 {stock_id: {'data': ndarray[D,18,1424], 'dates': list}}。"""
         logger = logging.getLogger(__name__)
         if not self.filtered_files:
-            return {}, None, None
-
-        valid_stocks = self.stock_ids
-
-        def _to_stock_id_str(value):
-            if isinstance(value, (int, np.integer)):
-                return f"{int(value):06d}"
-            return str(value).strip()
-
-        # ---- 第一步：8 线程并行读 CSV + 预处理 ----
-        def _read_one_csv(f):
-            df = pd.read_csv(f)
-            if "StockID" not in df.columns or "Time" not in df.columns:
-                raise ValueError(f"Invalid CSV schema (missing StockID/Time). file={f}")
-            feature_cols = [c for c in df.columns if c not in ("StockID", "Time")]
-            if len(feature_cols) != 18:
-                raise ValueError(f"Invalid CSV schema (expected 18 feature cols). file={f}")
-            df[feature_cols] = df[feature_cols].apply(pd.to_numeric, errors="coerce")
-            df[feature_cols] = df[feature_cols].replace([np.inf, -np.inf], np.nan)
-            if df[feature_cols].isna().any().any():
-                nan_count = df[feature_cols].isna().sum().sum()
-                df[feature_cols] = df.groupby('StockID')[feature_cols].apply(
-                    lambda g: g.interpolate(method='linear', limit_direction='both')
-                )
-                df[feature_cols] = df[feature_cols].fillna(0)
-                logger.warning("Interpolated %d NaN/Inf values in file=%s", nan_count, f)
-            basename = os.path.basename(f)
-            date_str = basename.replace("daily_summary_", "").replace(".csv", "")
-            df['date'] = pd.to_datetime(date_str)
-            return df
-
-        logger.info(f"Loading {len(self.filtered_files)} files (8 threads, single pass)...")
-        all_dfs = []
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = {executor.submit(_read_one_csv, f): f for f in self.filtered_files}
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Reading CSVs"):
-                f = futures[future]
-                try:
-                    all_dfs.append(future.result())
-                except Exception as e:
-                    logger.exception(f"Error reading {f}: {e}")
-
-        all_dfs.sort(key=lambda df: df['date'].iloc[0])
-
-        if not all_dfs:
-            return {}, None, None
-
-        # ---- 第二步：单次遍历，同时存数据 + 累加统计量 ----
-        stock_data = {}
-        total_sum = np.zeros(18)
-        total_sq_sum = np.zeros(18)
-        total_count = 0
-
-        for day_df in tqdm(all_dfs, desc="Processing & Stats"):
-            current_date = day_df['date'].iloc[0]
-            feature_cols = [c for c in day_df.columns if c not in ("StockID", "Time", "date")]
-
-            for stock_id_raw, group in day_df.groupby('StockID'):
-                stock_id = _to_stock_id_str(stock_id_raw)
-                if stock_id not in valid_stocks:
-                    continue
-
-                feats = group[feature_cols].values
-                if feats.shape[1] != 18:
-                    continue
-
-                # 缺失值插值兜底
-                if not np.isfinite(feats).all():
-                    feats = feats.astype(np.float64)
-                    mask = ~np.isfinite(feats)
-                    for col in range(feats.shape[1]):
-                        col_mask = mask[:, col]
-                        if col_mask.any():
-                            valid_m = ~col_mask
-                            if valid_m.sum() >= 2:
-                                feats[col_mask, col] = np.interp(
-                                    np.where(col_mask)[0], np.where(valid_m)[0], feats[valid_m, col]
-                                )
-                            else:
-                                feats[col_mask, col] = 0
-
-                # tick 数验证 + 裁剪
-                if feats.shape[0] == RAW_TICKS:
-                    feats = feats.T  # [18, 1442]
-                    feats = trim_auction_zeros(feats)  # [18, 1424]
-                elif feats.shape[0] == CLEAN_TICKS:
-                    feats = feats.T  # [18, 1424]
-                else:
-                    continue  # 跳过异常行数
-
-                # 累加统计量（在 log1p 变换后的空间）
-                if compute_stats:
-                    stats_arr = feats.copy()
-                    stats_arr[:6, :] = np.log1p(stats_arr[:6, :])
-                    total_sum += np.sum(stats_arr, axis=1)   # [18]
-                    total_sq_sum += np.sum(stats_arr ** 2, axis=1)
-                    total_count += stats_arr.shape[1]  # 1424 ticks
-
-                # 存入数据字典
-                if stock_id not in stock_data:
-                    stock_data[stock_id] = {'data': [], 'dates': []}
-                stock_data[stock_id]['data'].append(feats)
-                stock_data[stock_id]['dates'].append(current_date)
-
-        # ---- 第三步：整理输出 ----
-        final_stock_data = {}
-        for stock_id, content in stock_data.items():
-            if len(content['data']) > 0:
-                final_stock_data[stock_id] = {
-                    'data': np.stack(content['data']),
-                    'dates': content['dates']
-                }
-
-        logger.info(f"Loaded {len(final_stock_data)} stocks, {sum(len(v['dates']) for v in final_stock_data.values())} stock-days.")
-
-        # 计算 mean/std
-        computed_mean, computed_std = None, None
-        if compute_stats and total_count > 0:
-            mean = total_sum / total_count
-            var = (total_sq_sum / total_count) - (mean ** 2)
-            std = np.sqrt(np.maximum(var, 1e-10))
-            computed_mean = torch.FloatTensor(mean)
-            computed_std = torch.FloatTensor(std)
-            logger.info(f"Stats computed over {total_count} ticks.")
-
-        return final_stock_data, computed_mean, computed_std
+            return {}
+        logger.info(f"Loading {len(self.filtered_files)} files (engine={_CSV_ENGINE or 'default'})...")
+        stock_data = _read_csvs_to_per_stock_arrays(
+            self.filtered_files, self.stock_ids, desc="Reading CSVs"
+        )
+        logger.info(f"Loaded {len(stock_data)} stocks, "
+                    f"{sum(len(v['dates']) for v in stock_data.values())} stock-days.")
+        return stock_data
         
     def _prenormalize(self):
         """一次性对所有数据做 log1p（仅前6个特征）。z-score 已移除，由模型内 RevIN 替代。"""
@@ -288,7 +358,7 @@ class StockDataset(Dataset):
             input_data = input_seq.copy()
             input_data[:, :6, :] = np.log1p(input_data[:, :6, :])
 
-        return torch.from_numpy(np.ascontiguousarray(input_data)), {
+        return torch.from_numpy(input_data), {
             'max_value': torch.tensor(max_value, dtype=torch.float),
             'min_value': torch.tensor(min_value, dtype=torch.float),
             'max_day': torch.tensor(max_day, dtype=torch.long),
