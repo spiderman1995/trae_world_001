@@ -351,6 +351,27 @@ fold_2: train[day_11 .. day_490],  val[day_491 .. day_550]
 
 运行中按一次 `Ctrl+C`，训练会跑完当前 epoch 并保存 best model 后退出，tqdm 进度条显示 `STATUS=STOPPING`。按两次强制退出。fold 间的 `_stop_requested` 标志保证已完成 fold 的模型不会丢失。
 
+**启动自检与 run_config.txt**：
+
+训练启动时自动执行 3 块自检并**同时打印到终端 + 写入 `{output_dir}/run_config.txt`**：
+
+1. **Startup self-check**：pyarrow/CUDA/cudnn.benchmark/DataLoader/PyTorch 版本/数据目录/StockPool 缓存/输出目录冲突/resume_from/磁盘空间/git hash
+2. **Final args**：完整参数列表（复现实验必备）
+3. **Training scale estimate**：fold 数、样本/batch 量、日期范围
+
+训练结束（正常或 Ctrl+C 优雅停止）再写入：
+
+4. **Training Summary Report**：每 fold 表格（BestEp, ValLoss, Top1_Max, IC_max/min, Minutes）+ 最佳 fold 推荐 checkpoint 路径 + 总训练时长
+
+用途：SSH 断线或 tmux 丢 scrollback 时，`run_config.txt` 是唯一可靠的训练元信息来源。
+
+**训练过程中的智能诊断**：
+
+- **NaN/Inf loss 检测**：每 batch 检查，触发时自动跳过并 error 日志（避免数小时后才发现训练已崩）
+- **首 batch GPU 显存报告**：`allocated/reserved/total` + 利用率，帮助判断能否加大 batch_size
+- **Fold Doctor**（每 fold 结束）：基于 best_epoch 位置、train-val gap、RankIC、log_var 峰值、Top1_MinDay 等自动诊断并给出调参建议
+- **Trend Watch**（每 3 fold）：检测跨 fold val loss 漂移 / RankIC 退化，触发时提示停训或换策略
+
 **验证集数据范围**（比 test_range 多取 seq_len 天上下文）：
 ```python
 eval_range = (max(1, test_range[0] - seq_len), test_range[1])

@@ -4,7 +4,58 @@
 
 
 ================================================================================
-#6  2026-04-24  runs_rolling_v8（准备训练，本地/服务器）
+#7  2026-04-25  runs_rolling_v9（准备训练，CNN-only warm-start 假说验证）
+================================================================================
+
+训练脚本（Windows，单卡）：
+python -m src.train_rolling --data_dir "E:/pre_process/version1" --output_dir "runs_rolling_v9" --warm_start_mode cnn_only --day_sigma 2.0 --num_stocks 500 --sample_stride 10 --seq_len 180 --pred_len 15 --train_days 480 --test_days 60 --step_days 10 --epochs 20 --batch_size 32 --preload auto --cudnn_benchmark
+
+相比 v8 的改动（仅 1 处变量，干净归因）：
+- 新增 --warm_start_mode cnn_only：每 fold 只加载上一 fold 的 CNN，
+  ViT + 4 个 head 全部重新随机初始化（trunc_normal_）
+- v8 的 Dropout(0.5) on day heads 保留，--day_sigma 2.0 保留
+  （动一个变量原则，避免 v9 成败时归因混乱）
+
+假说背景（inspiration #15）：
+v7、v8 两次实验都显示同一个失败模式：
+- 后期 fold（约 6+）val_loss 单调上升、RankIC 转负
+- log_var_max_day 后期下降（confidently wrong），权重不降反升
+- v8 加 Dropout(0.5) + sigma=2.0 完全没改善这个模式
+
+→ 推断问题不在"day 头正则化强度"，而在 warm-start 跨 fold 累积污染：
+  ViT 学的是"过去 180 天表征 → 未来 15 天标签"的映射，
+  这个映射本身就因时段而异（牛/熊市节奏不同、节假日 calendar artifact 等）。
+  每 fold 继承上一 fold 的 ViT 权重 → 时代特化偏置叠加 → 越往后越无法泛化。
+  CNN 学的是 tick → 日级表征，这是物理规律，跨期通用，应保留 warm-start。
+
+v9 实验设计：
+- CNN warm-start：保留累积训练，让 encoder 越来越好
+- ViT + heads 每 fold 从随机初始化开始训练
+- 测试假说：如果 v9 后期 fold 不再发散，则证明问题是 ViT 累积污染
+
+预期 v9 表现（与 v8 对比观察重点）：
+| 指标                       | v8 后期表现       | v9 期望           |
+| Train/log_var_max_day      | 下降到 -0.1       | 不再单调下降       |
+| Val/loss_max_day           | 1.0 → 1.85        | 不再剧烈上升       |
+| Val/Loss_epoch             | 1.0 → 1.7（反向）  | 后期仍能 U 型谷底  |
+| Val/RankIC_max_value       | 转负              | 维持正值 0.05+     |
+
+代价：
+- ViT 每 fold 从随机起步，收敛慢 1.3-1.5x
+- 单 fold 训练时间从 ~1.5h 增至 ~2-2.5h
+- 总训练时间 110h → 150-180h（6-7 天）
+
+判断节点：
+- 跑前 10-15 个 fold 即可观察清楚趋势（v8 在 fold 6 就已发散）
+- 如果到 fold 10+ 仍稳定 → 假说成立，让它跑完
+- 如果 fold 10+ 又复现 v8 失败模式 → 假说错，转其他方向（信号本身？特征不够？）
+
+训练结果：
+（待填写）
+
+
+================================================================================
+#6  2026-04-24  runs_rolling_v8（已失败，2026-04-25 Ctrl+C 终止）
 ================================================================================
 
 训练脚本（Windows本地）：
@@ -36,8 +87,39 @@ TensorBoard 观察要点（判断 v8 是否奏效）：
 - Val/Loss_epoch 是否不再后期单调上升（v7 从 2 涨到 5）
 - Val/RankIC_max_value 能否稳定在 0.05+（v7 降到 0 附近）
 
-训练结果：
-（待填写）
+训练结果（2026-04-25，跑了 8 个 fold 后 Ctrl+C）：
+
+  Fold 1（橙色，健康基线）：
+  - Val Loss: 1.6 → 0.4（正常下降）
+  - Val/RankIC_max: +0.06（有正信号）
+  - Val/loss_max_day: ~0.85 平稳
+  - Train/log_var_max_day: 升到 +0.35（MTL 正常保护）
+  - Top1_MaxDay: 0.27-0.36
+
+  Fold 6（绿色，已失败）：
+  - Val Loss: 1.0 → 1.7（反向，单调上升）
+  - Val/RankIC_max: -0.05（变负，反向预测）
+  - Val/loss_max_day: 1.0 → 1.85（严重剪刀差，train ↓ val ↑）
+  - Train/log_var_max_day: 降到 -0.1（confidently wrong，权重反升）
+  - Top1_MaxDay: 降到 0.22
+
+  关键诊断：
+  - 完全复制 v7 的失败模式
+  - Dropout(0.5) on day heads + sigma=2.0 没有任何改善作用
+  - log_var_max_day 在后期 fold 下降（不是 v7 的"上升放弃"，
+    是更糟的"confidently wrong"——MTL 给错误答案加权）
+
+  归因：
+  - 问题不在"day 头正则化强度"——再加更强正则会压死 value 头
+  - 问题在跨 fold 的 ViT 权重累积污染
+  - day 头加 Dropout 是治标，污染源（共享 CNN+ViT 特征）的累积没断
+  - 验证 inspiration #15 假说的另一半：需要切断 ViT 的 warm-start
+
+  结论：
+  - v8 失败，按预定路线转 v9（inspiration #16）
+  - 实验设计有效：v7 vs v8 对比明确告诉我们"再加正则没用"
+  - 可用 fold 1-3 的 checkpoint 做回测（健康期模型）
+  - v9 测试 CNN-only warm-start 是否能切断累积污染
 
 
 ================================================================================

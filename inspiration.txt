@@ -107,6 +107,90 @@
     - 好处：消除 ViT 层的时代偏置累积
     - 前提：#11 在 v8 被验证仍不够时再做
 
+18. 双卡 V100 利用方式 — 并行跑不同实验 vs 单任务加速
+    背景：服务器有 2 张 V100 32GB，想让两张卡都跑起来
+
+    3 种方案对比：
+
+    A. DataParallel（nn.DataParallel）— 不推荐
+       - 改动：1 行代码 model = nn.DataParallel(model)
+       - 加速：仅 1.3-1.5x（master GPU 过载，GIL 瓶颈）
+       - PyTorch 已废弃，浪费硬件
+
+    B. DistributedDataParallel（DDP）— 真正单任务加速
+       - 单次训练时间 100h → ~55h，加速 1.7-1.9x
+       - 每卡独立处理 batch，all-reduce 同步梯度
+       - 改动量大：~100-150 行代码（init_process_group + DistributedSampler +
+         每 fold 里处理 rank / barrier）+ 1-2 天调试
+       - PyTorch 1.10.1 的 DDP 可用但 API 不如 2.0 优雅
+       - 优先级：低。除非单次训练真的成为瓶颈
+
+    C. 并行跑不同实验 — ⭐ 强烈推荐的默认做法
+       - GPU 0: v_X（主假说），GPU 1: v_Y（候选假说）
+       - 改动：0 行代码，打开两个终端各跑一个
+       - 研究效率 2x（同样时间验证两套假说）
+       - 不破坏 warm-start 链，不增加复杂度
+       - 适用于：模型结构/超参数探索期，需要多方向验证时
+
+    选择 C 的理由：
+    - 现在项目阶段缺的是"验证哪个方向对"，不缺速度
+    - 如果 100h 后主方案失败，再串行跑下一个又得 100h
+    - 并行跑 2 个实验，100h 出 2 组结果
+
+    C 的具体执行（Windows）：
+       终端 1：set CUDA_VISIBLE_DEVICES=0 && python -m src.train_rolling --output_dir runs_X ...
+       终端 2：set CUDA_VISIBLE_DEVICES=1 && python -m src.train_rolling --output_dir runs_Y ...
+
+    C 的内存预算：
+    - 每个进程独立缓存 GlobalDataCache
+    - 500 stocks × 1272 days × 100KB × 2 process = ~130 GB
+    - 256 GB 服务器够用；紧张时其中一个加 --preload off 回退
+
+    C 的推荐实验搭配（2026-04-24）：
+    - v8（day_sigma=2.0 + Dropout(0.5)）vs v9a（pred_len=10，IC 峰值对应）
+      两条完全不同的路径：v8 走"强化正则"，v9a 走"换预测目标"
+      结果可对比诊断：
+        v8 好 → 过拟合问题
+        v9a 好 → 预测窗口选错了
+        都好 → 两个问题都存在
+        都不好 → 信号本身不存在，需要重新审视特征
+    - 其他备选对比组：
+      v8 vs v9b（sigma=3.0 更宽）：看 sigma 值的敏感性
+      v8 vs v9c（weight_decay=1e-2 无 Dropout）：验证是 Dropout 有效还是"任意强正则"有效（v9c 需改代码）
+      v8 vs v_ws_cnn（只 warm-start CNN，inspiration #16）：验证是 day 头污染还是累积漂移
+
+    何时升级到 B（DDP）：
+    - 单次训练超过 200 小时且关键路径
+    - 基线已稳，要做大规模最终训练（而非探索）
+    - 迁移到 PyTorch 2.0+ 后顺便做（DDP API 更友好）
+
+19. CSV → Parquet 一次性转换，永久加速数据加载
+    - 动机：pyarrow 引擎让 CSV 读取快 2-3x，但 pyarrow 在服务器 Python 3.8 + Win
+      装不上（DLL 错误）。换用 Parquet 格式比 CSV 快 5-10x，比 pyarrow 还快，
+      不依赖 pyarrow 库
+    - 原理：Parquet 是列式二进制格式，类型已保存（不用 to_numeric 推断），
+      文件只有 CSV 的 30-50% 大小
+    - 实施：
+      * 新建 src/convert_csv_to_parquet.py，ProcessPoolExecutor 并行转换
+      * 转换时保留 CSV（方案 A），并列存在。Parquet 当性能缓存，CSV 当原始备份
+      * dataset.py 里 _read_csvs_to_per_stock_arrays：自动检测是否存在 Parquet，
+        有则用 pd.read_parquet，没有则 fallback 到 pd.read_csv
+      * 无需额外参数，无需清理 pyc，改完 dataset.py 即可
+    - 代价：
+      * 一次性转换 ~10-15 分钟（1272 文件 × 8 并行）
+      * 磁盘多 ~40%（Parquet ~30-50% CSV 大小，但多了一份）
+    - 收益：
+      * GlobalDataCache 启动时间从 ~5-10 分钟降到 ~1-2 分钟
+      * 每次训练启动都立刻受益（累计节省几小时）
+      * 所有读数据的脚本（回测、IC 测试等）一并受益
+    - 优先级：锦上添花，不紧急。当前瓶颈是训练算法而非数据 I/O
+    - 触发时机：
+      * v8 跑完后做（下次 v9 启动就能受益）
+      * 并行跑 v8 + v9 之前做（两个进程都享受启动加速）
+      * 或者任何时候觉得"每次等启动那几分钟有点烦"
+    - 可选进阶：转换后可在新服务器（PyTorch 2.0+）用 pyarrow 引擎的 parquet 读取，
+      对大数据集还能再快 2-3x
+
 17. 断点续训（fold 级自动跳过）
     - 动机：v8 规模 ~19 小时（77 fold × ~15min），长训中途崩溃损失大
       当前优雅停止 + fold 间 checkpoint 已覆盖 80% 场景，但 fold 内崩溃无恢复

@@ -1,4 +1,34 @@
 ================================================================================
+2026-04-25  版本更新记录（v9 准备：CNN-only warm-start）
+================================================================================
+
+A：不兼容性改动
+
+（无 — 模型结构和 loss 完全没动）
+
+B：兼容性改动（不影响已有 checkpoint）
+
+1. 新增 --warm_start_mode 参数（fold 间 warm-start 策略可选）
+   - full（默认）：每 fold 加载上一 fold 的 CNN + ViT + heads（v7/v8 行为）
+   - cnn_only（v9 用）：每 fold 只加载 CNN，ViT + 4 个 head 重新随机初始化
+   - 改动文件：src/train_rolling.py
+   - 用法：python -m src.train_rolling --warm_start_mode cnn_only ...
+   - 默认 full 保证向后兼容，老命令不带参数行为不变
+
+2. Startup self-check 显示当前 warm-start 模式
+   - 启动时打印 [INFO] warm_start_mode=cnn_only / full
+   - 避免静默回退到默认模式后归因混乱
+   - 改动文件：src/train_rolling.py
+
+设计动机（v8 失败后的直接对症）：
+- v7、v8 两次实验都显示后期 fold 全面退化（val_loss 上升、RankIC 转负）
+- 加 Dropout(0.5) + sigma=2.0 无效，说明问题不在 day 头本身正则化强度
+- 推断：跨 fold ViT 权重累积污染（详见 inspiration #15、train_diary v8 分析）
+- v9 切断 ViT 的累积链，保留 CNN（CNN 学的是物理规律，跨期通用）
+- 一次只动一个变量：v8 的 Dropout(0.5) on day heads 和 day_sigma=2.0 全部保留
+
+
+================================================================================
 2026-04-24  版本更新记录（v8 准备）
 ================================================================================
 
@@ -17,6 +47,27 @@ A：不兼容性改动（旧checkpoint无法直接加载，需重新训练）
    - 模型学"大概哪几天"，不强求精确到 1 天
    - 对推理/回测无影响（不依赖精确天数，用方向过滤 + 振幅打分）
    - 通过 --day_sigma 2.0 命令行指定
+
+B：兼容性改动（不影响已有 checkpoint）
+
+1. 训练监控系统增强
+   - Startup 自检：pyarrow/CUDA/cudnn.benchmark/磁盘/git hash/resume 状态全自检
+   - 启动时打印完整 args（复现实验必备）
+   - Training scale estimate：开训前预估 fold 数、样本量、时间范围
+   - 首 batch 后报告 GPU 显存占用（帮助调优 batch_size）
+   - NaN/Inf loss 自动检测并跳过，避免数小时后才发现训练崩
+   - Fold Doctor：每 fold 结束自动诊断并给出调参建议
+     （best_epoch 位置、train-val gap、RankIC 健康、log_var 放弃警告、Top1_MinDay 假高分）
+   - Trend Watch：每 3 fold 检查跨 fold 漂移，触发时建议停训或换策略
+   - Final Summary：训练结束显示最佳 fold 推荐 + 总用时
+   - 改动文件：src/train_rolling.py
+
+2. run_config.txt 持久化启动信息
+   - 启动自检/Final args/Training scale/Final Summary 同时写入
+     runs_XXX/run_config.txt，SSH 断线也不丢失
+   - 含 run_started 时间戳、hostname、完整命令行
+   - 顺手修复 summary 里 "Best ValLoss" vs "ValLoss" key 不一致导致 KeyError 的 bug
+   - 改动文件：src/train_rolling.py
 
 
 ================================================================================

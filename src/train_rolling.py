@@ -201,13 +201,22 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
     ).to(device)
 
     # Load weights from previous fold if a checkpoint is provided
+    # warm_start_mode:
+    #   full      - 加载 CNN + ViT + heads（v7/v8 行为，跨 fold 累积）
+    #   cnn_only  - 只加载 CNN，ViT + heads 每 fold 重新随机初始化（v9，切断 ViT 累积污染）
     if checkpoint_path and os.path.exists(checkpoint_path):
-        logger.info(f"Loading weights from checkpoint: {checkpoint_path}")
+        mode = getattr(args, 'warm_start_mode', 'full')
+        logger.info(f"Loading weights from checkpoint: {checkpoint_path} (warm_start_mode={mode})")
         try:
             checkpoint = torch.load(checkpoint_path, map_location=device)
             feature_extractor.load_state_dict(checkpoint['feature_extractor'], strict=False)
-            vit_model.load_state_dict(checkpoint['vit'], strict=False)
-            logger.info("Weights loaded successfully.")
+            if mode == 'full':
+                vit_model.load_state_dict(checkpoint['vit'], strict=False)
+                logger.info("Loaded CNN + ViT weights.")
+            elif mode == 'cnn_only':
+                logger.info("Loaded CNN only. ViT + heads use fresh random init (v9 strategy).")
+            else:
+                raise ValueError(f"Unknown warm_start_mode: {mode}")
         except Exception as e:
             logger.error(f"Failed to load checkpoint: {e}. Starting with random weights.")
     else:
@@ -658,6 +667,10 @@ def main():
                         help="LR scheduler: none, cosine (CosineAnnealingLR), plateau (ReduceLROnPlateau)")
     parser.add_argument("--max_grad_norm", type=float, default=1.0, help="Max gradient norm for clipping (0=disabled)")
     parser.add_argument("--resume_from", type=str, default=None, help="Path to a model checkpoint to start training from (for the first fold).")
+    parser.add_argument("--warm_start_mode", type=str, default="full", choices=["full", "cnn_only"],
+                        help="Cross-fold warm-start strategy: full (load CNN+ViT, default), "
+                             "cnn_only (load CNN only, ViT+heads reset each fold). "
+                             "v9 hypothesis: cnn_only avoids ViT cumulative pollution.")
     parser.add_argument("--start_date", type=str, default=None, help="Start date for training data (YYYY-MM-DD)")
     parser.add_argument("--end_date", type=str, default=None, help="End date for training data (YYYY-MM-DD)")
     # 股票采样
@@ -678,82 +691,103 @@ def main():
     args = parser.parse_args()
     set_seed(args.seed, benchmark=args.cudnn_benchmark)
 
+    # ---- 保存启动信息到 output_dir/run_config.txt（便于复盘）----
+    import socket
+    from datetime import datetime
+    os.makedirs(args.output_dir, exist_ok=True)
+    _config_path = os.path.join(args.output_dir, "run_config.txt")
+    _config_file = open(_config_path, "w", encoding="utf-8")
+
+    def tee(msg=""):
+        """同时输出到终端和 run_config.txt"""
+        print(msg)
+        _config_file.write(msg + "\n")
+        _config_file.flush()
+
+    tee(f"=== Run started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
+    tee(f"Host: {socket.gethostname()}")
+    tee(f"Working dir: {os.getcwd()}")
+    tee(f"Command: {' '.join(sys.argv)}")
+    tee()
+
     # ---- 启动自检（新环境容易漏掉的优化项 + sanity check）----
-    print("\n" + "=" * 60)
-    print(" Startup self-check")
-    print("=" * 60)
+    tee("=" * 60)
+    tee(" Startup self-check")
+    tee("=" * 60)
 
     # 1. 性能优化项
     from src.data.dataset import _CSV_ENGINE
     if _CSV_ENGINE == "pyarrow":
-        print(" [OK]   pyarrow detected → CSV parsing 2-3x faster")
+        tee(" [OK]   pyarrow detected → CSV parsing 2-3x faster")
     else:
-        print(" [HINT] pyarrow NOT installed → `pip install pyarrow` for 2-3x faster CSV reads")
+        tee(" [HINT] pyarrow NOT installed → `pip install pyarrow` for 2-3x faster CSV reads")
 
     if torch.cuda.is_available():
         gpu_name = torch.cuda.get_device_name(0)
         gpu_mem_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
-        print(f" [OK]   CUDA: {gpu_name} ({gpu_mem_gb:.0f} GB)")
+        tee(f" [OK]   CUDA: {gpu_name} ({gpu_mem_gb:.0f} GB)")
         if args.batch_size >= 64 and gpu_mem_gb < 24:
-            print(f" [WARN] batch_size={args.batch_size} on {gpu_mem_gb:.0f}GB GPU may OOM → try 16-32")
+            tee(f" [WARN] batch_size={args.batch_size} on {gpu_mem_gb:.0f}GB GPU may OOM → try 16-32")
         if args.cudnn_benchmark:
-            print(" [OK]   cudnn.benchmark=True → Conv auto-selects fastest algorithm")
+            tee(" [OK]   cudnn.benchmark=True → Conv auto-selects fastest algorithm")
         else:
-            print(" [HINT] cudnn.benchmark=False → add --cudnn_benchmark for 5-15% Conv speedup")
+            tee(" [HINT] cudnn.benchmark=False → add --cudnn_benchmark for 5-15% Conv speedup")
     else:
-        print(" [WARN] CUDA NOT available, training on CPU will be very slow")
+        tee(" [WARN] CUDA NOT available, training on CPU will be very slow")
 
     if args.num_workers == 0:
-        print(" [HINT] DataLoader num_workers=0 → add --num_workers 4 for parallel data prep (ignored on Windows)")
+        tee(" [HINT] DataLoader num_workers=0 → add --num_workers 4 for parallel data prep (ignored on Windows)")
     else:
-        print(f" [OK]   DataLoader num_workers={args.num_workers}")
+        tee(f" [OK]   DataLoader num_workers={args.num_workers}")
 
     if torch.__version__.startswith("1."):
-        print(f" [INFO] PyTorch {torch.__version__} (legacy). Flash Attention & torch.compile require 2.0+")
+        tee(f" [INFO] PyTorch {torch.__version__} (legacy). Flash Attention & torch.compile require 2.0+")
     else:
-        print(f" [OK]   PyTorch {torch.__version__}")
+        tee(f" [OK]   PyTorch {torch.__version__}")
 
     # 2. 数据与输出 sanity check
-    print()
+    tee()
     csv_files = glob.glob(os.path.join(args.data_dir, "daily_summary_*.csv"))
     if not csv_files:
-        print(f" [ERROR] No CSV files found in {args.data_dir}")
+        tee(f" [ERROR] No CSV files found in {args.data_dir}")
     else:
-        print(f" [OK]   Data dir: {len(csv_files)} CSV files at {args.data_dir}")
+        tee(f" [OK]   Data dir: {len(csv_files)} CSV files at {args.data_dir}")
         cache_files = glob.glob(os.path.join(args.data_dir, ".stock_pool_cache_*.pkl"))
         if cache_files:
-            print(f" [OK]   StockPool cache exists ({len(cache_files)} file(s)) → fast load")
+            tee(f" [OK]   StockPool cache exists ({len(cache_files)} file(s)) → fast load")
         else:
-            print(" [INFO] StockPool cache NOT found → first scan takes ~minutes")
+            tee(" [INFO] StockPool cache NOT found → first scan takes ~minutes")
 
-    if os.path.exists(args.output_dir):
-        existing_folds = glob.glob(os.path.join(args.output_dir, "fold_*"))
-        if existing_folds:
-            print(f" [WARN] Output dir {args.output_dir} has {len(existing_folds)} existing fold_*/ dirs → "
-                  f"will OVERWRITE. Ctrl+C to abort, rename if you want to keep them.")
-        else:
-            print(f" [OK]   Output dir {args.output_dir} exists but empty")
+    existing_folds = glob.glob(os.path.join(args.output_dir, "fold_*"))
+    if existing_folds:
+        tee(f" [WARN] Output dir {args.output_dir} has {len(existing_folds)} existing fold_*/ dirs → "
+            f"will OVERWRITE. Ctrl+C to abort, rename if you want to keep them.")
     else:
-        print(f" [OK]   Output dir {args.output_dir} (will be created)")
+        tee(f" [OK]   Output dir {args.output_dir} is empty")
 
     # 3. warm-start / resume 状态
     if args.resume_from:
         if os.path.exists(args.resume_from):
-            print(f" [OK]   Warm-start from {args.resume_from}")
+            tee(f" [OK]   Warm-start from {args.resume_from}")
         else:
-            print(f" [ERROR] --resume_from path does not exist: {args.resume_from}")
+            tee(f" [ERROR] --resume_from path does not exist: {args.resume_from}")
     else:
-        print(" [INFO] No --resume_from, fold 1 trains from random init. "
-              "Fold N+1 warm-starts from fold N automatically.")
+        tee(" [INFO] No --resume_from, fold 1 trains from random init. "
+            "Fold N+1 warm-starts from fold N automatically.")
+
+    if args.warm_start_mode == "cnn_only":
+        tee(" [INFO] warm_start_mode=cnn_only: each fold loads CNN only, ViT+heads reset (v9).")
+    else:
+        tee(" [INFO] warm_start_mode=full: each fold loads full CNN+ViT (default).")
 
     # 4. 磁盘空间（checkpoint 写盘）
     import shutil
     out_parent = os.path.dirname(os.path.abspath(args.output_dir)) or "."
     free_gb = shutil.disk_usage(out_parent).free / (1024 ** 3)
     if free_gb < 10:
-        print(f" [WARN] Only {free_gb:.1f}GB free on {out_parent} → checkpoints (~100MB each) may fail")
+        tee(f" [WARN] Only {free_gb:.1f}GB free on {out_parent} → checkpoints (~100MB each) may fail")
     else:
-        print(f" [OK]   Disk space: {free_gb:.0f}GB free on {out_parent}")
+        tee(f" [OK]   Disk space: {free_gb:.0f}GB free on {out_parent}")
 
     # 5. Git commit（可复现性）
     try:
@@ -767,19 +801,21 @@ def main():
             stderr=subprocess.DEVNULL, cwd=os.path.dirname(os.path.abspath(__file__))
         ).decode().strip()
         suffix = " (+uncommitted changes)" if dirty else ""
-        print(f" [OK]   Git commit: {git_hash}{suffix}")
+        tee(f" [OK]   Git commit: {git_hash}{suffix}")
     except Exception:
-        print(" [INFO] Not a git repo (or git unavailable)")
+        tee(" [INFO] Not a git repo (or git unavailable)")
 
-    print("=" * 60 + "\n")
+    tee("=" * 60)
+    tee()
 
     # 最终生效的 args（方便复现和排错）
-    print("=" * 60)
-    print(" Final args")
-    print("=" * 60)
+    tee("=" * 60)
+    tee(" Final args")
+    tee("=" * 60)
     for k, v in sorted(vars(args).items()):
-        print(f"   {k:20s} = {v}")
-    print("=" * 60 + "\n")
+        tee(f"   {k:20s} = {v}")
+    tee("=" * 60)
+    tee()
 
     # 参数校验
     if args.train_days < args.seq_len + args.pred_len:
@@ -804,17 +840,23 @@ def main():
     samples_per_stock_per_fold = max(0, (args.train_days - args.seq_len - args.pred_len) // args.sample_stride + 1)
     est_samples_per_fold = samples_per_stock_per_fold * args.num_stocks
     est_batches_per_epoch = est_samples_per_fold // args.batch_size
-    print("=" * 60)
-    print(" Training scale estimate")
-    print("=" * 60)
-    print(f" Total folds:                {len(folds)}")
-    print(f" Samples/stock/fold:         {samples_per_stock_per_fold}")
-    print(f" Samples/fold (est):         ~{est_samples_per_fold:,} (× {args.num_stocks} stocks)")
-    print(f" Batches/epoch (est):        ~{est_batches_per_epoch:,}")
-    print(f" Max epochs/fold:            {args.epochs} (early stop patience={args.patience})")
-    print(f" Train period first fold:    {folds[0]['train_period'][0]} .. {folds[0]['train_period'][1]}")
-    print(f" Test  period last  fold:    {folds[-1]['test_period'][0]} .. {folds[-1]['test_period'][1]}")
-    print("=" * 60 + "\n")
+    tee("=" * 60)
+    tee(" Training scale estimate")
+    tee("=" * 60)
+    tee(f" Total folds:                {len(folds)}")
+    tee(f" Samples/stock/fold:         {samples_per_stock_per_fold}")
+    tee(f" Samples/fold (est):         ~{est_samples_per_fold:,} (× {args.num_stocks} stocks)")
+    tee(f" Batches/epoch (est):        ~{est_batches_per_epoch:,}")
+    tee(f" Max epochs/fold:            {args.epochs} (early stop patience={args.patience})")
+    tee(f" Train period first fold:    {folds[0]['train_period'][0]} .. {folds[0]['train_period'][1]}")
+    tee(f" Test  period last  fold:    {folds[-1]['test_period'][0]} .. {folds[-1]['test_period'][1]}")
+    tee("=" * 60)
+    tee()
+
+    # run_config.txt 头部记录完成，后续训练运行时信息仍正常打印到终端
+    # （配置文件保持打开，程序退出时 OS 自动 flush/close）
+    _config_file.write(f"\n=== Config header done at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+    _config_file.flush()
 
     # ---- 预计算股票采样 + 数据预加载 ----
     pool = None
@@ -918,34 +960,38 @@ def main():
 
     overall_elapsed = time.time() - overall_start
 
-    # ---- 事后总结报告 ----
-    print(f"\n\n{'='*30} Training Summary Report {'='*30}")
+    # ---- 事后总结报告（同时写入 run_config.txt，便于复盘）----
+    tee()
+    tee(f"\n{'='*30} Training Summary Report {'='*30}")
     summary_df = pd.DataFrame(fold_summaries)
-    print(summary_df.to_string(index=False))
-    print(f"{'='*85}")
+    summary_str = summary_df.to_string(index=False)
+    tee(summary_str)
+    tee("=" * 85)
 
     if fold_summaries:
         # 最佳 fold 推荐（用于回测）
-        best_row = min(fold_summaries, key=lambda r: r["Best ValLoss"])
-        mean_val = sum(r["Best ValLoss"] for r in fold_summaries) / len(fold_summaries)
-        print(f"\n Total folds completed:     {len(fold_summaries)} / {len(folds)}")
-        print(f" Total training time:       {overall_elapsed/60:.1f} min ({overall_elapsed/3600:.2f} h)")
-        print(f" Mean Best ValLoss:         {mean_val:.4f}")
+        best_row = min(fold_summaries, key=lambda r: r["ValLoss"])
+        mean_val = sum(r["ValLoss"] for r in fold_summaries) / len(fold_summaries)
+        tee(f"\n Total folds completed:     {len(fold_summaries)} / {len(folds)}")
+        tee(f" Total training time:       {overall_elapsed/60:.1f} min ({overall_elapsed/3600:.2f} h)")
+        tee(f" Mean Best ValLoss:         {mean_val:.4f}")
         best_fold_num = best_row['Fold']
         best_ckpt_path = os.path.join(args.output_dir, f'fold_{best_fold_num}', 'model_final.pth')
-        print(f" Best fold (lowest ValLoss): Fold {best_fold_num} → ValLoss={best_row['Best ValLoss']:.4f}")
-        print(f" Recommended checkpoint:    {best_ckpt_path}")
+        tee(f" Best fold (lowest ValLoss): Fold {best_fold_num} → ValLoss={best_row['ValLoss']:.4f}")
+        tee(f" Recommended checkpoint:    {best_ckpt_path}")
 
         # 诊断性提示
-        val_losses = [r["Best ValLoss"] for r in fold_summaries]
+        val_losses = [r["ValLoss"] for r in fold_summaries]
         if len(val_losses) >= 3:
             trend_recent = sum(val_losses[-3:]) / 3
             trend_early = sum(val_losses[:3]) / 3
             if trend_recent > trend_early * 1.3:
-                print(f" [WARN] Val loss in recent folds ({trend_recent:.3f}) is {trend_recent/trend_early:.1f}x "
-                      f"higher than early folds ({trend_early:.3f}) → possible overfitting / drift, "
-                      f"use early fold checkpoint for backtest.")
-    print(f"{'='*85}")
+                tee(f" [WARN] Val loss in recent folds ({trend_recent:.3f}) is {trend_recent/trend_early:.1f}x "
+                    f"higher than early folds ({trend_early:.3f}) → possible overfitting / drift, "
+                    f"use early fold checkpoint for backtest.")
+    tee("=" * 85)
+    tee(f"\n=== Run finished: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
+    _config_file.close()
 
 if __name__ == "__main__":
     main()
