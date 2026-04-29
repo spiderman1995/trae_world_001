@@ -4,6 +4,68 @@
 
 
 ================================================================================
+#8  2026-04-29  v10 准备（CNN-ViT 解耦 + 参数缩减 + IC 指标 + 双卡实验）
+================================================================================
+
+代码改动（未训练，等待部署到服务器）：
+
+  模型架构：
+  - feature_extractor.py: output_dim 默认 1024→512，新增 self.output_dim 属性
+  - transformer.py: 新增 input_dim 参数，当 input_dim != embed_dim 时自动加投影层
+    Linear(512, 384)，CNN 和 ViT 维度解耦
+  - v10 默认: cnn_dim=512, embed_dim=384, depth=3 → 总参数 ~7.4M (v9: 52.4M)
+
+  训练脚本 (train_rolling.py)：
+  - 新增 --cnn_dim, --embed_dim, --depth CLI 参数
+  - step_days 默认 10→20, sample_stride 默认 10→15(=pred_len)
+  - warm_start_mode 默认 cnn_only→full（小 ViT 不易记忆 regime）
+  - validate() 返回 dict，新增 Pearson IC + Spearman RankIC
+  - 新增 CrossFold TensorBoard (global_logs/)：IC/RankIC/ICIR 跨 fold 曲线
+  - Trend Watch 每 3 fold 打印 ICIR
+  - Training Summary Report 新增 IC/ICIR 统计
+  - checkpoint config 新增 cnn_dim 字段
+
+  推理兼容：
+  - backtest.py / inference.py / test_weekly.py: 从 checkpoint 读 cnn_dim，
+    传入 StockViT(input_dim=cnn_dim)，兼容旧 checkpoint(fallback embed_dim)
+
+  双卡训练脚本 (run_v10_dual_gpu.sh)：
+  - GPU 0: 实验 A — embed_dim=384, depth=4, ~11.5M 参数
+  - GPU 1: 实验 B — embed_dim=256, depth=3, ~4.7M 参数
+  - 公共: cnn_dim=512, num_stocks=9999(全部合格), step_days=15,
+    sample_stride=15, warm_start_mode=full, batch_size=32
+
+训练脚本（服务器双卡，使用 run_v10_dual_gpu.sh）：
+  # 同时启动
+  nohup bash run_v10_dual_gpu.sh > dual_gpu.log 2>&1 &
+  # 或分开启动
+  nohup bash run_v10_dual_gpu.sh gpu0 > gpu0.log 2>&1 &
+  nohup bash run_v10_dual_gpu.sh gpu1 > gpu1.log 2>&1 &
+
+等价手动命令（单卡场景）：
+  # 实验 A（GPU 0）
+  CUDA_VISIBLE_DEVICES=0 python -m src.train_rolling --data_dir "E:/pre_process/version1" --output_dir runs_v10_A --cnn_dim 512 --embed_dim 384 --depth 4 --num_heads 4 --num_stocks 9999 --batch_size 32 --seq_len 180 --pred_len 15 --train_days 480 --test_days 60 --step_days 15 --sample_stride 15 --warm_start_mode full --stock_pool random --scheduler cosine --max_grad_norm 1.0 --preload auto --cudnn_benchmark
+
+  # 实验 B（GPU 1）
+  CUDA_VISIBLE_DEVICES=1 python -m src.train_rolling --data_dir "E:/pre_process/version1" --output_dir runs_v10_B --cnn_dim 512 --embed_dim 256 --depth 3 --num_heads 4 --num_stocks 9999 --batch_size 32 --seq_len 180 --pred_len 15 --train_days 480 --test_days 60 --step_days 15 --sample_stride 15 --warm_start_mode full --stock_pool random --scheduler cosine --max_grad_norm 1.0 --preload auto --cudnn_benchmark
+
+v10 核心假说：
+  1. 过参数化是 v9 过拟合的主因 → 7.4M 应明显缓解
+  2. 小 ViT + full warm-start：模型无容量记忆 regime，可安全累积学习
+  3. CNN 512 维特征足够（v9 value 头表现证明）
+
+观察重点：
+  - loss_max_day 在后期 fold 是否还爆炸（v9: 0.7→1.8）
+  - val_loss U 形反弹是否消失
+  - RankIC 是否跨 fold 保持正值
+  - ICIR > 0.5 可用，> 1.0 强信号
+  - 实验 A vs B：哪个参数量更合适
+
+训练结果：
+（待填写）
+
+
+================================================================================
 #7  2026-04-25  runs_rolling_v9（准备训练，CNN-only warm-start 假说验证）
 ================================================================================
 
@@ -100,68 +162,6 @@ v9 实验设计：
   - v9 证实两个独立问题：① 过参数化（52.4M vs 14K样本 = 3600:1）② warm-start 污染
   - v10 方案：砍参数(7.4M) + CNN-ViT 解耦(投影层) + 切回 full warm-start
   - max_day 如果在 v10 仍爆炸，考虑价格通道方案（inspiration #22）替代 4 头
-
-
-================================================================================
-#8  2026-04-29  v10 准备（CNN-ViT 解耦 + 参数缩减 + IC 指标 + 双卡实验）
-================================================================================
-
-代码改动（未训练，等待部署到服务器）：
-
-  模型架构：
-  - feature_extractor.py: output_dim 默认 1024→512，新增 self.output_dim 属性
-  - transformer.py: 新增 input_dim 参数，当 input_dim != embed_dim 时自动加投影层
-    Linear(512, 384)，CNN 和 ViT 维度解耦
-  - v10 默认: cnn_dim=512, embed_dim=384, depth=3 → 总参数 ~7.4M (v9: 52.4M)
-
-  训练脚本 (train_rolling.py)：
-  - 新增 --cnn_dim, --embed_dim, --depth CLI 参数
-  - step_days 默认 10→20, sample_stride 默认 10→15(=pred_len)
-  - warm_start_mode 默认 cnn_only→full（小 ViT 不易记忆 regime）
-  - validate() 返回 dict，新增 Pearson IC + Spearman RankIC
-  - 新增 CrossFold TensorBoard (global_logs/)：IC/RankIC/ICIR 跨 fold 曲线
-  - Trend Watch 每 3 fold 打印 ICIR
-  - Training Summary Report 新增 IC/ICIR 统计
-  - checkpoint config 新增 cnn_dim 字段
-
-  推理兼容：
-  - backtest.py / inference.py / test_weekly.py: 从 checkpoint 读 cnn_dim，
-    传入 StockViT(input_dim=cnn_dim)，兼容旧 checkpoint(fallback embed_dim)
-
-  双卡训练脚本 (run_v10_dual_gpu.sh)：
-  - GPU 0: 实验 A — embed_dim=384, depth=4, ~11.5M 参数
-  - GPU 1: 实验 B — embed_dim=256, depth=3, ~4.7M 参数
-  - 公共: cnn_dim=512, num_stocks=9999(全部合格), step_days=15,
-    sample_stride=15, warm_start_mode=full, batch_size=32
-
-训练脚本（服务器双卡，使用 run_v10_dual_gpu.sh）：
-  # 同时启动
-  nohup bash run_v10_dual_gpu.sh > dual_gpu.log 2>&1 &
-  # 或分开启动
-  nohup bash run_v10_dual_gpu.sh gpu0 > gpu0.log 2>&1 &
-  nohup bash run_v10_dual_gpu.sh gpu1 > gpu1.log 2>&1 &
-
-等价手动命令（单卡场景）：
-  # 实验 A（GPU 0）
-  CUDA_VISIBLE_DEVICES=0 python -m src.train_rolling --data_dir "E:/pre_process/version1" --output_dir runs_v10_A --cnn_dim 512 --embed_dim 384 --depth 4 --num_heads 4 --num_stocks 9999 --batch_size 32 --seq_len 180 --pred_len 15 --train_days 480 --test_days 60 --step_days 15 --sample_stride 15 --warm_start_mode full --stock_pool random --scheduler cosine --max_grad_norm 1.0 --preload auto --cudnn_benchmark
-
-  # 实验 B（GPU 1）
-  CUDA_VISIBLE_DEVICES=1 python -m src.train_rolling --data_dir "E:/pre_process/version1" --output_dir runs_v10_B --cnn_dim 512 --embed_dim 256 --depth 3 --num_heads 4 --num_stocks 9999 --batch_size 32 --seq_len 180 --pred_len 15 --train_days 480 --test_days 60 --step_days 15 --sample_stride 15 --warm_start_mode full --stock_pool random --scheduler cosine --max_grad_norm 1.0 --preload auto --cudnn_benchmark
-
-v10 核心假说：
-  1. 过参数化是 v9 过拟合的主因 → 7.4M 应明显缓解
-  2. 小 ViT + full warm-start：模型无容量记忆 regime，可安全累积学习
-  3. CNN 512 维特征足够（v9 value 头表现证明）
-
-观察重点：
-  - loss_max_day 在后期 fold 是否还爆炸（v9: 0.7→1.8）
-  - val_loss U 形反弹是否消失
-  - RankIC 是否跨 fold 保持正值
-  - ICIR > 0.5 可用，> 1.0 强信号
-  - 实验 A vs B：哪个参数量更合适
-
-训练结果：
-（待填写）
 
 
 ================================================================================
@@ -377,7 +377,13 @@ python -m src.train_rolling --data_dir E:/pre_process/version1 --train_days 480 
 
 
 ================================================================================
-#2  202
+#2  2026-04-13  runs_rolling_2020_2021（服务器，10 folds）
+================================================================================
+
+训练脚本：
+python -m src.train_rolling --data_dir E:/pre_process/version1 --train_days 300 --test_days 60 --step_days 10 --num_stocks 50 --sample_stride 10 --epochs 20 --batch_size 32 --output_dir runs_rolling_2020_2021
+
+参数特点：
 - seq_len=180, pred_len=60
 - train_days=300, test_days=60
 - num_stocks=50（随机采样50只）
@@ -398,13 +404,7 @@ python -m src.train_rolling --data_dir E:/pre_process/version1 --train_days 480 
 - dropout=0.1 太低
 - 50只股票样本多样性不够
 
-6-04-13  runs_rolling_2020_2021（服务器，10 folds）
-================================================================================
 
-训练脚本：
-python -m src.train_rolling --data_dir E:/pre_process/version1 --train_days 300 --test_days 60 --step_days 10 --num_stocks 50 --sample_stride 10 --epochs 20 --batch_size 32 --output_dir runs_rolling_2020_2021
-
-参数特点：
 ================================================================================
 #1  2026-04-10  runs_rolling_v1~v3（本地调试）
 ================================================================================
