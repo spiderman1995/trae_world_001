@@ -79,17 +79,19 @@ def main():
     checkpoint = torch.load(args.checkpoint_path, map_location=device)
     cfg = checkpoint.get("config", {})
     seq_len = int(cfg.get("seq_len", 60))
-    pred_len = int(cfg.get("pred_len", 60))
-    embed_dim = int(cfg.get("embed_dim", 1024))
-    depth = int(cfg.get("depth", 4))
+    pred_len = int(cfg.get("pred_len", 15))
+    cnn_dim = int(cfg.get("cnn_dim", cfg.get("embed_dim", 512)))
+    embed_dim = int(cfg.get("embed_dim", 384))
+    depth = int(cfg.get("depth", 3))
     num_heads = int(cfg.get("num_heads", 4))
     input_channels = int(cfg.get("input_channels", 18))
 
-    feature_extractor = FeatureExtractor(input_channels=input_channels, output_dim=embed_dim).to(device)
+    feature_extractor = FeatureExtractor(input_channels=input_channels, output_dim=cnn_dim).to(device)
     vit_model = StockViT(
         seq_len=seq_len,
         pred_len=pred_len,
         embed_dim=embed_dim,
+        input_dim=cnn_dim,
         depth=depth,
         num_heads=num_heads
     ).to(device)

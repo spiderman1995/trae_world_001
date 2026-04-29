@@ -18,17 +18,18 @@ class Predictor:
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         
         cfg = checkpoint.get("config") or {}
-        self.embed_dim = embed_dim or cfg.get("embed_dim") or 1024
+        self.cnn_dim = cfg.get("cnn_dim") or cfg.get("embed_dim") or 512
+        self.embed_dim = embed_dim or cfg.get("embed_dim") or 384
         self.seq_len = seq_len or cfg.get("seq_len") or 180
-        self.pred_len = pred_len or cfg.get("pred_len") or 60
-        self.depth = depth or cfg.get("depth") or 4
+        self.pred_len = pred_len or cfg.get("pred_len") or 15
+        self.depth = depth or cfg.get("depth") or 3
         self.num_heads = num_heads or cfg.get("num_heads") or 4
         self.input_channels = input_channels or cfg.get("input_channels") or 18
         self.mean = checkpoint.get("mean")
         self.std = checkpoint.get("std")
 
-        self.feature_extractor = FeatureExtractor(input_channels=self.input_channels, output_dim=self.embed_dim).to(self.device)
-        self.vit_model = StockViT(seq_len=self.seq_len, pred_len=self.pred_len, embed_dim=self.embed_dim, depth=self.depth, num_heads=self.num_heads).to(self.device)
+        self.feature_extractor = FeatureExtractor(input_channels=self.input_channels, output_dim=self.cnn_dim).to(self.device)
+        self.vit_model = StockViT(seq_len=self.seq_len, pred_len=self.pred_len, embed_dim=self.embed_dim, input_dim=self.cnn_dim, depth=self.depth, num_heads=self.num_heads).to(self.device)
         
         self.feature_extractor.load_state_dict(checkpoint['feature_extractor'])
         self.vit_model.load_state_dict(checkpoint['vit'])

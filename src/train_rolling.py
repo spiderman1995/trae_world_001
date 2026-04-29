@@ -188,17 +188,20 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
     logger.info(f"Using device: {device}")
     
     logger.info("Building models...")
-    embed_dim = 1024 
-    feature_extractor = FeatureExtractor(input_channels=18, output_dim=embed_dim).to(device)
+    cnn_dim = args.cnn_dim
+    embed_dim = args.embed_dim
+    feature_extractor = FeatureExtractor(input_channels=18, output_dim=cnn_dim).to(device)
     vit_model = StockViT(
-        seq_len=args.seq_len, 
-        pred_len=args.pred_len, 
-        embed_dim=embed_dim, 
-        depth=args.depth, 
+        seq_len=args.seq_len,
+        pred_len=args.pred_len,
+        embed_dim=embed_dim,
+        input_dim=cnn_dim,
+        depth=args.depth,
         num_heads=args.num_heads,
         drop_ratio=args.drop_ratio,
         attn_drop_ratio=args.attn_drop_ratio
     ).to(device)
+    logger.info(f"CNN output_dim={cnn_dim}, ViT embed_dim={embed_dim}, depth={args.depth}")
 
     # Load weights from previous fold if a checkpoint is provided
     # warm_start_mode:
@@ -305,6 +308,8 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
     best_topk_max = 0.0
     best_topk_min = 0.0
     best_epoch = 0
+    best_ic_max = 0.0
+    best_ic_min = 0.0
     best_rank_ic_max = 0.0
     best_rank_ic_min = 0.0
     best_train_loss = float("inf")
@@ -395,18 +400,26 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
         mean_train_loss = epoch_train_loss / max(epoch_train_steps, 1)
         writer.add_scalar("Train/Loss_epoch", mean_train_loss, epoch + 1)
 
-        (val_loss, topk_max, topk_min,
-         val_loss_max_value, val_loss_min_value, val_loss_max_day, val_loss_min_day,
-         rank_ic_max, rank_ic_min) = validate(
+        val_metrics = validate(
             feature_extractor, vit_model, mtl_loss_wrapper, val_loader, device, criterion_day, criterion_value, args.topk, fold_idx
         )
+        val_loss = val_metrics['loss']
+        topk_max = val_metrics['topk_max']
+        topk_min = val_metrics['topk_min']
+        rank_ic_max = val_metrics['rank_ic_max']
+        rank_ic_min = val_metrics['rank_ic_min']
+        ic_max = val_metrics['ic_max']
+        ic_min = val_metrics['ic_min']
+
         writer.add_scalar("Val/Loss_epoch", val_loss, epoch + 1)
         writer.add_scalar(f"Val/Top{args.topk}_MaxDay_epoch", topk_max, epoch + 1)
         writer.add_scalar(f"Val/Top{args.topk}_MinDay_epoch", topk_min, epoch + 1)
-        writer.add_scalar("Val/loss_max_value", val_loss_max_value, epoch + 1)
-        writer.add_scalar("Val/loss_min_value", val_loss_min_value, epoch + 1)
-        writer.add_scalar("Val/loss_max_day", val_loss_max_day, epoch + 1)
-        writer.add_scalar("Val/loss_min_day", val_loss_min_day, epoch + 1)
+        writer.add_scalar("Val/loss_max_value", val_metrics['loss_max_value'], epoch + 1)
+        writer.add_scalar("Val/loss_min_value", val_metrics['loss_min_value'], epoch + 1)
+        writer.add_scalar("Val/loss_max_day", val_metrics['loss_max_day'], epoch + 1)
+        writer.add_scalar("Val/loss_min_day", val_metrics['loss_min_day'], epoch + 1)
+        writer.add_scalar("Val/IC_max_value", ic_max, epoch + 1)
+        writer.add_scalar("Val/IC_min_value", ic_min, epoch + 1)
         writer.add_scalar("Val/RankIC_max_value", rank_ic_max, epoch + 1)
         writer.add_scalar("Val/RankIC_min_value", rank_ic_min, epoch + 1)
 
@@ -422,7 +435,8 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
         logger.info(
             f"Fold {fold_idx} Epoch {epoch+1}: TrainLoss={mean_train_loss:.4f}, "
             f"ValLoss={val_loss:.4f}, Top{args.topk}Max={topk_max:.4f}, Top{args.topk}Min={topk_min:.4f}, "
-            f"RankIC_max={rank_ic_max:.4f}, RankIC_min={rank_ic_min:.4f}, LR={current_lr:.2e}"
+            f"IC_max={ic_max:.4f}, RankIC_max={rank_ic_max:.4f}, "
+            f"IC_min={ic_min:.4f}, RankIC_min={rank_ic_min:.4f}, LR={current_lr:.2e}"
         )
 
         # 追踪 log_var 峰值（判断模型是否在"放弃"某任务）
@@ -436,6 +450,8 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
             best_topk_max = topk_max
             best_topk_min = topk_min
             best_epoch = epoch + 1
+            best_ic_max = ic_max
+            best_ic_min = ic_min
             best_rank_ic_max = rank_ic_max
             best_rank_ic_min = rank_ic_min
             patience_counter = 0
@@ -448,6 +464,7 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
                 'config': {
                     'seq_len': args.seq_len,
                     'pred_len': args.pred_len,
+                    'cnn_dim': cnn_dim,
                     'embed_dim': embed_dim,
                     'depth': args.depth,
                     'num_heads': args.num_heads,
@@ -551,6 +568,8 @@ def train_one_fold(args, fold_idx, dates, train_period, test_period, train_range
         'best_topk_max': best_topk_max,
         'best_topk_min': best_topk_min,
         'best_epoch': best_epoch,
+        'best_ic_max': best_ic_max,
+        'best_ic_min': best_ic_min,
         'best_rank_ic_max': best_rank_ic_max,
         'best_rank_ic_min': best_rank_ic_min,
         'best_train_loss': best_train_loss,
@@ -622,22 +641,32 @@ def validate(feature_extractor, vit_model, mtl_loss_wrapper, loader, device, cri
     topk_max = hit_max / total_samples
     topk_min = hit_min / total_samples
 
-    # Rank IC: Spearman correlation between predicted and true values
-    from scipy.stats import spearmanr
+    # IC metrics: Pearson (linear) + Spearman (rank)
+    from scipy.stats import spearmanr, pearsonr
     pred_mv = torch.cat(all_pred_max_value).numpy()
     true_mv = torch.cat(all_true_max_value).numpy()
     pred_minv = torch.cat(all_pred_min_value).numpy()
     true_minv = torch.cat(all_true_min_value).numpy()
-    rank_ic_max = spearmanr(pred_mv, true_mv).correlation if len(pred_mv) > 2 else 0.0
-    rank_ic_min = spearmanr(pred_minv, true_minv).correlation if len(pred_minv) > 2 else 0.0
-    if not np.isfinite(rank_ic_max):
-        rank_ic_max = 0.0
-    if not np.isfinite(rank_ic_min):
-        rank_ic_min = 0.0
 
-    return (avg_loss, topk_max, topk_min,
-            avg_loss_max_value, avg_loss_min_value, avg_loss_max_day, avg_loss_min_day,
-            rank_ic_max, rank_ic_min)
+    def _safe_corr(func, x, y):
+        if len(x) < 3:
+            return 0.0
+        val = func(x, y)[0]
+        return val if np.isfinite(val) else 0.0
+
+    ic_max = _safe_corr(pearsonr, pred_mv, true_mv)
+    ic_min = _safe_corr(pearsonr, pred_minv, true_minv)
+    rank_ic_max = _safe_corr(spearmanr, pred_mv, true_mv)
+    rank_ic_min = _safe_corr(spearmanr, pred_minv, true_minv)
+
+    return {
+        'loss': avg_loss,
+        'topk_max': topk_max, 'topk_min': topk_min,
+        'loss_max_value': avg_loss_max_value, 'loss_min_value': avg_loss_min_value,
+        'loss_max_day': avg_loss_max_day, 'loss_min_day': avg_loss_min_day,
+        'ic_max': ic_max, 'ic_min': ic_min,
+        'rank_ic_max': rank_ic_max, 'rank_ic_min': rank_ic_min,
+    }
 
 def main():
     parser = argparse.ArgumentParser()
@@ -648,7 +677,9 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--seq_len", type=int, default=180)
     parser.add_argument("--pred_len", type=int, default=15)
-    parser.add_argument("--depth", type=int, default=4)
+    parser.add_argument("--cnn_dim", type=int, default=512, help="CNN output dimension (fixed, decoupled from ViT)")
+    parser.add_argument("--embed_dim", type=int, default=384, help="ViT internal embedding dimension")
+    parser.add_argument("--depth", type=int, default=3, help="Number of Transformer blocks")
     parser.add_argument("--num_heads", type=int, default=4)
     parser.add_argument("--day_sigma", type=float, default=1.0)
     parser.add_argument("--topk", type=int, default=1)
@@ -656,7 +687,7 @@ def main():
     # For tuning
     parser.add_argument("--train_days", type=int, default=480)
     parser.add_argument("--test_days", type=int, default=60)
-    parser.add_argument("--step_days", type=int, default=10)
+    parser.add_argument("--step_days", type=int, default=20)
     parser.add_argument("--weight_decay", type=float, default=5e-3)
     parser.add_argument("--drop_ratio", type=float, default=0.2)
     parser.add_argument("--attn_drop_ratio", type=float, default=0.2)
@@ -668,9 +699,8 @@ def main():
     parser.add_argument("--max_grad_norm", type=float, default=1.0, help="Max gradient norm for clipping (0=disabled)")
     parser.add_argument("--resume_from", type=str, default=None, help="Path to a model checkpoint to start training from (for the first fold).")
     parser.add_argument("--warm_start_mode", type=str, default="full", choices=["full", "cnn_only"],
-                        help="Cross-fold warm-start strategy: full (load CNN+ViT, default), "
-                             "cnn_only (load CNN only, ViT+heads reset each fold). "
-                             "v9 hypothesis: cnn_only avoids ViT cumulative pollution.")
+                        help="Cross-fold warm-start strategy: full (load CNN+ViT+projection, default for v10+), "
+                             "cnn_only (load CNN only, ViT+heads reset each fold, v9 strategy).")
     parser.add_argument("--start_date", type=str, default=None, help="Start date for training data (YYYY-MM-DD)")
     parser.add_argument("--end_date", type=str, default=None, help="End date for training data (YYYY-MM-DD)")
     # 股票采样
@@ -678,7 +708,7 @@ def main():
                         help="Stock sampling strategy: random (sample from all), chinext50 (fixed 50)")
     parser.add_argument("--num_stocks", type=int, default=500, help="Number of stocks to sample per fold (when stock_pool=random)")
     parser.add_argument("--min_list_days", type=int, default=180, help="Exclude stocks listed less than N calendar days (IPO filter)")
-    parser.add_argument("--sample_stride", type=int, default=10, help="Sample-level sliding window stride (days). Larger = less overlap, fewer samples")
+    parser.add_argument("--sample_stride", type=int, default=15, help="Sample-level sliding window stride (days). Default=pred_len to avoid prediction target overlap")
     # 数据加载
     parser.add_argument("--num_workers", type=int, default=4, help="DataLoader num_workers (0=main thread)")
     # Loss
@@ -776,9 +806,9 @@ def main():
             "Fold N+1 warm-starts from fold N automatically.")
 
     if args.warm_start_mode == "cnn_only":
-        tee(" [INFO] warm_start_mode=cnn_only: each fold loads CNN only, ViT+heads reset (v9).")
+        tee(" [INFO] warm_start_mode=cnn_only: each fold loads CNN only, ViT+heads reset (v9 strategy).")
     else:
-        tee(" [INFO] warm_start_mode=full: each fold loads full CNN+ViT (default).")
+        tee(f" [INFO] warm_start_mode=full: each fold loads CNN+ViT+projection (v10+, embed_dim={args.embed_dim}).")
 
     # 4. 磁盘空间（checkpoint 写盘）
     import shutil
@@ -822,6 +852,11 @@ def main():
         raise ValueError(
             f"train_days({args.train_days}) must >= seq_len+pred_len({args.seq_len + args.pred_len}). "
             f"Each sample needs {args.seq_len + args.pred_len} consecutive days."
+        )
+    if args.embed_dim % args.num_heads != 0:
+        raise ValueError(
+            f"embed_dim({args.embed_dim}) must be divisible by num_heads({args.num_heads}). "
+            f"Common choices: 256, 384, 512, 768."
         )
 
     dates = get_sorted_dates(args.data_dir)
@@ -907,6 +942,7 @@ def main():
 
     previous_model_path = args.resume_from
     fold_summaries = []
+    global_writer = SummaryWriter(log_dir=os.path.join(args.output_dir, "global_logs"))
     for i, fold in enumerate(folds):
         if _stop_requested:
             print(f"\nGraceful stop before fold {i+1}. Completed {i} folds.")
@@ -936,10 +972,26 @@ def main():
             "BestEp": result['best_epoch'],
             "ValLoss": round(result['best_val_loss'], 4),
             "Top1_Max": round(result['best_topk_max'], 3),
-            "IC_max": round(result['best_rank_ic_max'], 3),
-            "IC_min": round(result['best_rank_ic_min'], 3),
+            "IC": round(result['best_ic_max'], 3),
+            "RankIC": round(result['best_rank_ic_max'], 3),
             "Min": round(fold_elapsed / 60, 1),
         })
+
+        # ---- Cross-fold TensorBoard: Rolling IC / RankIC / ICIR ----
+        fold_num = i + 1
+        global_writer.add_scalar("CrossFold/IC_max", result['best_ic_max'], fold_num)
+        global_writer.add_scalar("CrossFold/RankIC_max", result['best_rank_ic_max'], fold_num)
+        global_writer.add_scalar("CrossFold/ValLoss", result['best_val_loss'], fold_num)
+        all_ics_so_far = [s['IC'] for s in fold_summaries]
+        all_rank_ics_so_far = [s['RankIC'] for s in fold_summaries]
+        if len(all_ics_so_far) >= 3:
+            ic_m = sum(all_ics_so_far) / len(all_ics_so_far)
+            ic_s = (sum((x - ic_m)**2 for x in all_ics_so_far) / len(all_ics_so_far)) ** 0.5
+            ric_m = sum(all_rank_ics_so_far) / len(all_rank_ics_so_far)
+            ric_s = (sum((x - ric_m)**2 for x in all_rank_ics_so_far) / len(all_rank_ics_so_far)) ** 0.5
+            global_writer.add_scalar("CrossFold/ICIR", ic_m / ic_s if ic_s > 1e-8 else 0.0, fold_num)
+            global_writer.add_scalar("CrossFold/RankICIR", ric_m / ric_s if ric_s > 1e-8 else 0.0, fold_num)
+        global_writer.flush()
 
         # ---- Trend Watch：每 3 fold 做一次跨 fold 漂移检查 ----
         if len(fold_summaries) >= 6 and (i + 1) % 3 == 0:
@@ -947,7 +999,7 @@ def main():
             early_vals = [s['ValLoss'] for s in fold_summaries[:3]]
             recent_mean = sum(recent_vals) / 3
             early_mean = sum(early_vals) / 3
-            recent_ic = [s['IC_max'] for s in fold_summaries[-3:]]
+            recent_ic = [s['RankIC'] for s in fold_summaries[-3:]]
 
             if recent_mean > early_mean * 1.3:
                 print(f"\n[TREND WARN] Recent 3 folds ValLoss avg={recent_mean:.3f} is "
@@ -957,6 +1009,19 @@ def main():
             if all(ic < 0.01 for ic in recent_ic):
                 print(f"\n[TREND WARN] Recent 3 folds all RankIC_max < 0.01 ({recent_ic}). "
                       f"Value head predictive signal degraded. Check pred_len / features / regime shift.")
+
+            # ICIR (IC Information Ratio) = mean(IC) / std(IC)
+            all_ics = [s['IC'] for s in fold_summaries]
+            all_rank_ics = [s['RankIC'] for s in fold_summaries]
+            if len(all_ics) >= 3:
+                ic_mean = sum(all_ics) / len(all_ics)
+                ic_std = (sum((x - ic_mean)**2 for x in all_ics) / len(all_ics)) ** 0.5
+                icir = ic_mean / ic_std if ic_std > 1e-8 else 0.0
+                rank_ic_mean = sum(all_rank_ics) / len(all_rank_ics)
+                rank_ic_std = (sum((x - rank_ic_mean)**2 for x in all_rank_ics) / len(all_rank_ics)) ** 0.5
+                rank_icir = rank_ic_mean / rank_ic_std if rank_ic_std > 1e-8 else 0.0
+                print(f"\n[TREND] ICIR={icir:.3f} (IC mean={ic_mean:.3f}, std={ic_std:.3f}), "
+                      f"RankICIR={rank_icir:.3f} (RankIC mean={rank_ic_mean:.3f}, std={rank_ic_std:.3f})")
 
     overall_elapsed = time.time() - overall_start
 
@@ -980,6 +1045,23 @@ def main():
         tee(f" Best fold (lowest ValLoss): Fold {best_fold_num} → ValLoss={best_row['ValLoss']:.4f}")
         tee(f" Recommended checkpoint:    {best_ckpt_path}")
 
+        # IC / ICIR 统计
+        all_ics = [r["IC"] for r in fold_summaries]
+        all_rank_ics = [r["RankIC"] for r in fold_summaries]
+        n = len(all_ics)
+        ic_mean = sum(all_ics) / n
+        rank_ic_mean = sum(all_rank_ics) / n
+        if n >= 3:
+            ic_std = (sum((x - ic_mean)**2 for x in all_ics) / n) ** 0.5
+            rank_ic_std = (sum((x - rank_ic_mean)**2 for x in all_rank_ics) / n) ** 0.5
+            icir = ic_mean / ic_std if ic_std > 1e-8 else 0.0
+            rank_icir = rank_ic_mean / rank_ic_std if rank_ic_std > 1e-8 else 0.0
+            tee(f" IC  mean={ic_mean:.4f}  std={ic_std:.4f}  ICIR={icir:.4f}")
+            tee(f" RankIC  mean={rank_ic_mean:.4f}  std={rank_ic_std:.4f}  RankICIR={rank_icir:.4f}")
+        else:
+            tee(f" IC  mean={ic_mean:.4f}  (need >=3 folds for ICIR)")
+            tee(f" RankIC  mean={rank_ic_mean:.4f}")
+
         # 诊断性提示
         val_losses = [r["ValLoss"] for r in fold_summaries]
         if len(val_losses) >= 3:
@@ -991,6 +1073,7 @@ def main():
                     f"use early fold checkpoint for backtest.")
     tee("=" * 85)
     tee(f"\n=== Run finished: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
+    global_writer.close()
     _config_file.close()
 
 if __name__ == "__main__":

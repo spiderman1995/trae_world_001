@@ -83,7 +83,7 @@ class Block(nn.Module):
         return x
 
 class StockViT(nn.Module):
-    def __init__(self, seq_len=180, pred_len=60, embed_dim=10000, depth=4, num_heads=4, mlp_ratio=4.0, qkv_bias=True,
+    def __init__(self, seq_len=180, pred_len=60, embed_dim=384, input_dim=None, depth=3, num_heads=4, mlp_ratio=4.0, qkv_bias=True,
                  qk_scale=None, drop_ratio=0., attn_drop_ratio=0., drop_path_ratio=0., norm_layer=None,
                  act_layer=None):
         super(StockViT, self).__init__()
@@ -91,7 +91,13 @@ class StockViT(nn.Module):
         norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
         act_layer = act_layer or nn.GELU
 
-        # No PatchEmbed, input is [B, SeqLen, EmbedDim]
+        # 投影层：当 CNN 输出维度 (input_dim) != ViT 内部维度 (embed_dim) 时，
+        # 用线性投影降维，让 CNN 保留完整特征提取能力，ViT 独立控制容量
+        if input_dim is not None and input_dim != embed_dim:
+            self.input_proj = nn.Linear(input_dim, embed_dim)
+        else:
+            self.input_proj = None
+
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.pos_embed = nn.Parameter(torch.zeros(1, seq_len + 1, embed_dim))
         self.pos_drop = nn.Dropout(p=drop_ratio)
@@ -107,7 +113,6 @@ class StockViT(nn.Module):
 
         self.head_max_value = nn.Linear(embed_dim, 1)
         self.head_min_value = nn.Linear(embed_dim, 1)
-        # day 头单独加重 Dropout，抑制其过拟合污染共享特征（v7 观察到 max_day 是 val loss 发散的主因）
         self.head_max_day = nn.Sequential(
             nn.Dropout(0.5),
             nn.Linear(embed_dim, pred_len),
@@ -132,6 +137,9 @@ class StockViT(nn.Module):
             nn.init.ones_(m.weight)
 
     def forward_features(self, x):
+        # x: [B, SeqLen, InputDim] (InputDim may differ from EmbedDim)
+        if self.input_proj is not None:
+            x = self.input_proj(x)
         # x: [B, SeqLen, EmbedDim]
         B = x.shape[0]
         cls_token = self.cls_token.expand(B, -1, -1)
@@ -139,7 +147,7 @@ class StockViT(nn.Module):
         x = self.pos_drop(x + self.pos_embed)
         x = self.blocks(x)
         x = self.norm(x)
-        return x[:, 0] # Return CLS token
+        return x[:, 0]
 
     def forward(self, x):
         x = self.forward_features(x)

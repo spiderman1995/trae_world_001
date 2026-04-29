@@ -80,10 +80,10 @@ def train(args):
     logger.info("Building models...")
     # 1DCNN Feature Extractor
     # Reduce dimension from 10000 to 1024 for laptop 4050 GPU (6GB VRAM)
-    embed_dim = 1024 # Was 10000
-    feature_extractor = FeatureExtractor(input_channels=18, output_dim=embed_dim).to(device)
-    # ViT
-    vit_model = StockViT(seq_len=args.seq_len, pred_len=args.pred_len, embed_dim=embed_dim, depth=args.depth, num_heads=args.num_heads).to(device)
+    cnn_dim = 512
+    embed_dim = 384
+    feature_extractor = FeatureExtractor(input_channels=18, output_dim=cnn_dim).to(device)
+    vit_model = StockViT(seq_len=args.seq_len, pred_len=args.pred_len, embed_dim=embed_dim, input_dim=cnn_dim, depth=args.depth, num_heads=args.num_heads).to(device)
     
     logger.info(f"Models moved to {device}. Embed Dim: {embed_dim}")
     

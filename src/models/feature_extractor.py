@@ -57,7 +57,7 @@ class BasicBlock1D(nn.Module):
         return out
 
 class FeatureExtractor(nn.Module):
-    def __init__(self, input_channels=18, output_dim=1024):
+    def __init__(self, input_channels=18, output_dim=512):
         super(FeatureExtractor, self).__init__()
 
         # RevIN: 替代全局z-score，按样本自适应归一化
@@ -84,6 +84,7 @@ class FeatureExtractor(nn.Module):
 
         # BatchNorm 替代 Tanh：梯度不饱和，分布可学习
         self.output_norm = nn.BatchNorm1d(output_dim)
+        self.output_dim = output_dim
 
     def _make_layer(self, planes, blocks, stride=1):
         downsample = None

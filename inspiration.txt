@@ -207,3 +207,126 @@
       * v8 先不加（v7 证明单 fold 稳定，跑一次 19h 能接受）
       * 若 v8 或 v9 真的崩过浪费了几小时 → 立即加最简版
       * 若后续需要持续迭代（每天都跑）→ 提前加
+
+20. Warm-start 矛盾分析：为什么 LLM 能保留权重，我们的 ViT 不能？（2026-04-26）
+    - 核心矛盾：大模型预训练都保留历史权重，但我们 ViT warm-start 导致 regime shift 累积污染
+    - 原因：LLM 预训练的三个前提条件在我们场景全部不满足
+      * 分布平稳性：语言几十年不变 vs 市场 regime 每几个月就变（牛熊/政策/板块轮动）
+      * 数据/参数比：LLM 300B tokens/175B params vs 我们 12K 样本/50.6M params（严重过参数化）
+      * 训练顺序：LLM shuffle 训练 vs 我们必须按时间滚动（连续暴露于同一 regime）
+    - 参数分布：CNN 1.76M (3.4%) vs ViT 50.6M (96.6%)
+      小数据 + 非平稳分布 + 高容量 = warm-start 必然累积 regime 记忆
+    - 解法方向（按优先级）：
+      A. 降低 ViT 容量（最推荐，与 #14 呼应）
+         * embed_dim 1024→256, depth 4→2，参数从 50M 降到 ~3-5M
+         * 模型容量匹配数据量后，没有能力记忆 regime 特异性，warm-start 可能重新 work
+         * 这和 LLM 的逻辑一致：不是靠丢弃权重，而是靠让容量匹配数据
+      B. 差异化学习率
+         * CNN 正常 lr，ViT 用 1/10 lr warm-start（类似 LLM fine-tune 小 lr 策略）
+         * 简单易实现，可与方案 A 组合
+      C. 全历史预训练 + fold 微调
+         * 先用全部数据训一个"基模"ViT，每 fold 只微调（冻结大部分层）
+         * 类似 LLM pretrain → finetune 范式
+      D. EWC（弹性权重巩固）
+         * 惩罚对"旧 fold 重要参数"的修改，保护通用知识，允许适应新 regime
+         * 实现复杂度高，效果不确定
+      E. Warm-start backbone，仅重置 heads（折中方案）
+         * ViT 4层 Transformer 可能学了通用序列关系，heads 过拟合了 label 分布
+         * 只重置 heads（33K 参数），保留 backbone（50.5M）
+    - 实验路径：
+      * v9 (cnn_only) 先验证"ViT 重置能稳定"
+      * 若 v9 成功 → 下一步试方案 A（降容量 + warm-start），看能否两全
+      * 方案 B（差异化 lr）可同时试，成本极低
+
+21. v10 模型框架设计：降 ViT 容量 + 全市场训练 + 双卡实验（2026-04-27）
+
+    背景：
+    - v9 (fold 18+) 验证 cnn_only warm-start 完全解决累积污染
+    - 但 RankIC 不稳定（-0.06 ~ +0.14），根因：52.4M 参数 vs 14,500 样本 = 3600:1
+    - 需要同时降模型容量 + 增加数据量
+
+    当前参数分布：
+    - 1D-CNN: 1.76M (3.4%)  — tick→daily 特征，与股票数量无关
+    - StockViT: 50.6M (96.6%) — 序列→预测，过参数化
+    - Heads: 33K (~0%) — 预测头
+
+    sample_stride 对样本数的影响（容易遗漏！）：
+    - stride=10: 每股每fold 29 样本（v7-v9 用的）
+    - stride=5:  每股每fold 58 样本
+    - stride=1:  每股每fold 286 样本（10倍，但99.4%输入重叠）
+
+    数据量估算（train_days=480, seq_len=180, pred_len=15, stride=10）：
+    | 股票数 | 样本/fold | 全量内存/fold |
+    | 500  (v9)  | 14,500   | ~27 GB  |
+    | 800  (30/31)| 23,200   | ~39 GB  |
+    | 2000 (全A)  | 58,000   | ~98 GB  |
+
+    模型容量推荐（目标参数/样本 = 1:5 ~ 1:20）：
+    | 场景       | embed_dim | depth | heads | ViT参数 | 总参数 | 比例(stride=10) |
+    | 800只      | 384       | 3     | 4     | 5.3M   | ~7M   | 1:3 → 配stride=5 |
+    | 2000只     | 384       | 3     | 4     | 5.3M   | ~7M   | 1:8 ✅           |
+    | 2000只+大  | 512       | 4     | 4     | 12.7M  | 14.5M | 1:4 → 需正则化   |
+    注：如果 stride=1，样本×10，所有方案比例都很健康
+
+    embed_dim 选择依据：
+    - 必须能被 num_heads 整除（256/384/512/768/1024 对 4 heads 都OK）
+    - 384 = DeiT-Small 级别，head_dim=96，attention 表达力足够
+    - 512 = ViT-Small 级别，head_dim=128，适合大数据量
+    - 1024 = 当前，对我们的数据量明显过大
+
+    推荐 v10 框架（2000只全A股）：
+    - 1D-CNN: output_dim=512（原1024→512），其余不变，~1.76M
+    - StockViT: embed_dim=512, depth=4, num_heads=4, ~12.7M
+    - 或保守版: embed_dim=384, depth=3, ~5.3M
+    - Heads: 不变（Linear→1 for value, Dropout+Linear→pred_len for day）
+    - 总参数: 14.5M（512版）或 7M（384版）
+
+    训练策略调整：
+    - num_stocks: 500 → 全部合格股票（~2000）
+    - step_days: 10 → 20（减半fold数，相邻fold 98%重叠是浪费）
+    - batch_size: 32 → 64（样本多，大batch更稳定）
+    - sample_stride: 保持10（或尝试5增加样本）
+    - warm_start_mode: cnn_only（v9 已验证有效）
+    - preload: off（2000只×480天≈98GB，每fold单独加载）
+    - train_days: 480（不够可提高到600）
+
+    双卡 V100 实验设计（方案C：两卡跑不同实验，零代码改动）：
+    - 卡0: 全A股 2000只, embed_dim=512, depth=4 (14.5M)
+    - 卡1: 30/31前缀 800只, embed_dim=384, depth=3 (7M)
+    - RAM: 39+98≈137GB，256GB够用
+    - 同时出结果，直接对比
+    - 等确定最优配置后再上 DDP 加速
+
+    训练时间估算（单V100, step_days=20）：
+    - 2000只: 58K样本, bs=64 → 906 steps/epoch × 8epoch ≈ 7248 steps/fold
+      ~0.08s/step → 每fold ~10min, 34 folds → ~5.7h
+    - 800只: 23K样本, bs=64 → 363 steps/epoch × 8epoch ≈ 2900 steps/fold
+      每fold ~4min, 34 folds → ~2.3h
+    - 两张卡同时跑：最多 ~6h 出两组结果
+
+
+22. 价格通道预测（替代四头方案）
+    来源：v9 训练分析，loss_max_day 逐fold爆炸(0.7→1.8)，max_day 头可能是伪任务
+    
+    核心思路：
+    - 用 2 个序列头替代原来的 4 个标量头
+    - head_daily_max: Linear(embed_dim, pred_len) → 预测15天逐日最高价收益率
+    - head_daily_min: Linear(embed_dim, pred_len) → 预测15天逐日最低价收益率
+    - max_value / min_value / max_day / min_day 全部从序列推导，不再需要单独的头
+    
+    监督信号：4 → 30（+7.5x），每天的daily_max和daily_min都是独立标签
+    
+    价格通道评估指标：
+    - 包络率: 实际价格落在 [pred_min, pred_max] 内的天数 / 15，目标 >90%
+    - 通道宽度: mean(pred_max - pred_min)，越窄越有交易价值
+    - 突破方向: 价格突破上轨 vs 下轨比例，判断模型偏保守还是激进
+    
+    数据来源：target_seq[:, 2, :].max(axis=1) 和 .min(axis=1) 已有，不需要新数据
+    
+    优势：
+    1. 监督信号密度提升7.5倍，缓解 "180个token只产生4个信号" 的稀疏问题
+    2. 逐日预测天然包含时序结构，模型被迫学习每天的动态变化
+    3. 回测可视化直观：预测上下轨包住实际股价线
+    4. 消除 max_day 这个难学的分类任务（从序列 argmax 推导即可）
+    
+    实施计划：v10 先用原4头跑基线，确认参数缩减有效后，v11 切换到价格通道方案

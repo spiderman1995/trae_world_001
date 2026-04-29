@@ -264,19 +264,21 @@ class BacktestEngine:
         cfg = checkpoint.get("config", {})
         self.seq_len = int(cfg.get("seq_len", 60))
         self.pred_len = int(cfg.get("pred_len", 60))
-        self.embed_dim = int(cfg.get("embed_dim", 1024))
-        self.depth = int(cfg.get("depth", 4))
+        self.cnn_dim = int(cfg.get("cnn_dim", cfg.get("embed_dim", 512)))
+        self.embed_dim = int(cfg.get("embed_dim", 384))
+        self.depth = int(cfg.get("depth", 3))
         self.num_heads = int(cfg.get("num_heads", 4))
         self.input_channels = int(cfg.get("input_channels", 18))
         self.mean = checkpoint.get("mean")
         self.std = checkpoint.get("std")
 
         self.feature_extractor = FeatureExtractor(
-            input_channels=self.input_channels, output_dim=self.embed_dim
+            input_channels=self.input_channels, output_dim=self.cnn_dim
         ).to(self.device)
         self.vit_model = StockViT(
             seq_len=self.seq_len, pred_len=self.pred_len,
-            embed_dim=self.embed_dim, depth=self.depth, num_heads=self.num_heads
+            embed_dim=self.embed_dim, input_dim=self.cnn_dim,
+            depth=self.depth, num_heads=self.num_heads
         ).to(self.device)
         self.feature_extractor.load_state_dict(checkpoint["feature_extractor"])
         self.vit_model.load_state_dict(checkpoint["vit"])

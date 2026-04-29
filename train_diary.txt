@@ -50,6 +50,116 @@ v9 实验设计：
 - 如果到 fold 10+ 仍稳定 → 假说成立，让它跑完
 - 如果 fold 10+ 又复现 v8 失败模式 → 假说错，转其他方向（信号本身？特征不够？）
 
+训练结果（TensorBoard 观察，跑到 fold 11+，2026-04-27~29 持续观察）：
+
+  假说验证：CNN-only warm-start 部分有效，但未完全解决问题。
+
+  Fold 1（基线，最健康）：
+  - Val Loss: 降到 ~0.2，无反弹
+  - Val/loss_max_day: ~0.7，基本平稳
+  - Val/RankIC_max: 峰值 ~0.15，正值为主
+  - log_var_max_day: 升到 ~0.25（MTL 正常保护）
+  - Top1_MaxDay: 0.30-0.34
+
+  Fold 5：
+  - Val Loss: 降到 ~0.3，尾部微翘
+  - Val/loss_max_day: 从 ~1.0 升到 ~1.3 ↑
+  - Val/RankIC_max: 有正值(0.05-0.1)但负值出现更多
+  - log_var_max_day: 升到 ~0.3 ↑
+
+  Fold 8：
+  - Val Loss: 降到 ~0.3 后反弹到 0.5-0.7（过拟合明显）
+  - Val/loss_max_day: 从 ~1.0 飙到 ~1.5 ↑↑
+  - Val/RankIC_max: 多数在 0 附近，信号几乎消失
+  - log_var_max_day: 升到 ~0.35 ↑↑（MTL 最大降权）
+
+  Fold 9-11：
+  - Val Loss: 降到 ~0.3 后反弹到 ~0.5-0.6
+  - Val/loss_max_day: 升到 ~1.5-1.8（逐 fold 恶化）
+  - Val/RankIC_max: 频繁为负，预测信号基本无效
+  - Top1_MaxDay: 降到 0.18-0.20
+
+  跨 fold 趋势：
+  | 指标            | Fold1  | Fold5  | Fold8  | Fold11 |
+  | val_loss 末期    | 0.3    | 0.35   | 0.7    | 0.6    |
+  | loss_max_day    | 0.7    | 1.3    | 1.5    | 1.8    |
+  | RankIC_max      | +0.15  | +0.05  | ~0     | <0     |
+  | loss_max_value  | 0.04   | 0.05   | 0.06   | 0.065  |
+  | loss_min_value  | 0.003  | 0.004  | 0.005  | 0.003  |
+
+  诊断与结论：
+  1. CNN-only warm-start 确实缓解了 v8 的"confidently wrong"（log_var 不再下降）
+     但后期 fold 仍然严重过拟合 → 说明过参数化(52.4M)是独立于 warm-start 的另一个问题
+  2. max_day 头是唯一的灾难点：0.7→1.8 逐 fold 爆炸
+     value 头（max_value、min_value）退化幅度很小
+  3. 即使 ViT 每 fold 重置，后期 fold 仍更差 →
+     可能是后期时段(2023-2024)本身更难预测（regime shift），不完全是模型问题
+  4. min_value 头始终健康（0.003-0.005），预测下界比上界和时间点都更容易学
+
+  决策：
+  - v9 证实两个独立问题：① 过参数化（52.4M vs 14K样本 = 3600:1）② warm-start 污染
+  - v10 方案：砍参数(7.4M) + CNN-ViT 解耦(投影层) + 切回 full warm-start
+  - max_day 如果在 v10 仍爆炸，考虑价格通道方案（inspiration #22）替代 4 头
+
+
+================================================================================
+#8  2026-04-29  v10 准备（CNN-ViT 解耦 + 参数缩减 + IC 指标 + 双卡实验）
+================================================================================
+
+代码改动（未训练，等待部署到服务器）：
+
+  模型架构：
+  - feature_extractor.py: output_dim 默认 1024→512，新增 self.output_dim 属性
+  - transformer.py: 新增 input_dim 参数，当 input_dim != embed_dim 时自动加投影层
+    Linear(512, 384)，CNN 和 ViT 维度解耦
+  - v10 默认: cnn_dim=512, embed_dim=384, depth=3 → 总参数 ~7.4M (v9: 52.4M)
+
+  训练脚本 (train_rolling.py)：
+  - 新增 --cnn_dim, --embed_dim, --depth CLI 参数
+  - step_days 默认 10→20, sample_stride 默认 10→15(=pred_len)
+  - warm_start_mode 默认 cnn_only→full（小 ViT 不易记忆 regime）
+  - validate() 返回 dict，新增 Pearson IC + Spearman RankIC
+  - 新增 CrossFold TensorBoard (global_logs/)：IC/RankIC/ICIR 跨 fold 曲线
+  - Trend Watch 每 3 fold 打印 ICIR
+  - Training Summary Report 新增 IC/ICIR 统计
+  - checkpoint config 新增 cnn_dim 字段
+
+  推理兼容：
+  - backtest.py / inference.py / test_weekly.py: 从 checkpoint 读 cnn_dim，
+    传入 StockViT(input_dim=cnn_dim)，兼容旧 checkpoint(fallback embed_dim)
+
+  双卡训练脚本 (run_v10_dual_gpu.sh)：
+  - GPU 0: 实验 A — embed_dim=384, depth=4, ~11.5M 参数
+  - GPU 1: 实验 B — embed_dim=256, depth=3, ~4.7M 参数
+  - 公共: cnn_dim=512, num_stocks=9999(全部合格), step_days=15,
+    sample_stride=15, warm_start_mode=full, batch_size=32
+
+训练脚本（服务器双卡，使用 run_v10_dual_gpu.sh）：
+  # 同时启动
+  nohup bash run_v10_dual_gpu.sh > dual_gpu.log 2>&1 &
+  # 或分开启动
+  nohup bash run_v10_dual_gpu.sh gpu0 > gpu0.log 2>&1 &
+  nohup bash run_v10_dual_gpu.sh gpu1 > gpu1.log 2>&1 &
+
+等价手动命令（单卡场景）：
+  # 实验 A（GPU 0）
+  CUDA_VISIBLE_DEVICES=0 python -m src.train_rolling --data_dir "E:/pre_process/version1" --output_dir runs_v10_A --cnn_dim 512 --embed_dim 384 --depth 4 --num_heads 4 --num_stocks 9999 --batch_size 32 --seq_len 180 --pred_len 15 --train_days 480 --test_days 60 --step_days 15 --sample_stride 15 --warm_start_mode full --stock_pool random --scheduler cosine --max_grad_norm 1.0 --preload auto --cudnn_benchmark
+
+  # 实验 B（GPU 1）
+  CUDA_VISIBLE_DEVICES=1 python -m src.train_rolling --data_dir "E:/pre_process/version1" --output_dir runs_v10_B --cnn_dim 512 --embed_dim 256 --depth 3 --num_heads 4 --num_stocks 9999 --batch_size 32 --seq_len 180 --pred_len 15 --train_days 480 --test_days 60 --step_days 15 --sample_stride 15 --warm_start_mode full --stock_pool random --scheduler cosine --max_grad_norm 1.0 --preload auto --cudnn_benchmark
+
+v10 核心假说：
+  1. 过参数化是 v9 过拟合的主因 → 7.4M 应明显缓解
+  2. 小 ViT + full warm-start：模型无容量记忆 regime，可安全累积学习
+  3. CNN 512 维特征足够（v9 value 头表现证明）
+
+观察重点：
+  - loss_max_day 在后期 fold 是否还爆炸（v9: 0.7→1.8）
+  - val_loss U 形反弹是否消失
+  - RankIC 是否跨 fold 保持正值
+  - ICIR > 0.5 可用，> 1.0 强信号
+  - 实验 A vs B：哪个参数量更合适
+
 训练结果：
 （待填写）
 
